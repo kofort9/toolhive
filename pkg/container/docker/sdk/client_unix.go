@@ -157,5 +157,18 @@ func findDockerSocket() (string, error) {
 		logger.Debugf("Failed to check Rancher Desktop socket at %s: %v", rancherDesktopPath, err)
 	}
 
+	// Try Colima socket path on macOS
+	if home := os.Getenv("HOME"); home != "" {
+		colimaPath := filepath.Join(home, ColimaDesktopMacSocketPath)
+		_, err := os.Stat(colimaPath)
+
+		if err == nil {
+			logger.Debugf("Found Colima socket at %s", colimaPath)
+			return colimaPath, nil
+		}
+
+		logger.Debugf("Failed to check Colima socket at %s: %v", colimaPath, err)
+	}
+
 	return "", fmt.Errorf("docker socket not found in standard locations")
 }
