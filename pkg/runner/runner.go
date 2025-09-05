@@ -42,6 +42,12 @@ type Runner struct {
 	// middlewareFunctions is a slice of middleware functions to apply to the transport
 	middlewareFunctions []types.MiddlewareFunction
 
+	// namedMiddlewares is a slice of named middleware functions to apply to the transport
+	namedMiddlewares []types.NamedMiddleware
+
+	// currentMiddlewareName tracks the name of the middleware currently being created
+	currentMiddlewareName string
+
 	// authInfoHandler is the authentication info handler set by auth middleware
 	authInfoHandler http.Handler
 
@@ -64,6 +70,13 @@ func NewRunner(runConfig *RunConfig, statusManager statuses.StatusManager) *Runn
 func (r *Runner) AddMiddleware(middleware types.Middleware) {
 	r.middlewares = append(r.middlewares, middleware)
 	r.middlewareFunctions = append(r.middlewareFunctions, middleware.Handler())
+	
+	// Add named middleware for logging purposes
+	namedMw := types.NamedMiddleware{
+		Name:     r.currentMiddlewareName,
+		Function: middleware.Handler(),
+	}
+	r.namedMiddlewares = append(r.namedMiddlewares, namedMw)
 }
 
 // SetAuthInfoHandler sets the authentication info handler
@@ -118,6 +131,9 @@ func (r *Runner) Run(ctx context.Context) error {
 			return fmt.Errorf("unsupported middleware type: %s", middlewareConfig.Type)
 		}
 
+		// Set the current middleware name for logging
+		r.currentMiddlewareName = middlewareConfig.Type
+
 		// Create the middleware instance using the factory function.
 		// The factory will add the middleware to the runner and handle any special configuration.
 		if err := factory(&middlewareConfig, r); err != nil {
@@ -127,6 +143,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Set all middleware functions and handlers on transport config
 	transportConfig.Middlewares = r.middlewareFunctions
+	transportConfig.NamedMiddlewares = r.namedMiddlewares
 	transportConfig.AuthInfoHandler = r.authInfoHandler
 	transportConfig.PrometheusHandler = r.prometheusHandler
 

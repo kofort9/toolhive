@@ -37,6 +37,7 @@ type HTTPTransport struct {
 	deployer          rt.Deployer
 	debug             bool
 	middlewares       []types.MiddlewareFunction
+	namedMiddlewares  []types.NamedMiddleware
 	prometheusHandler http.Handler
 	authInfoHandler   http.Handler
 
@@ -95,6 +96,11 @@ func NewHTTPTransport(
 		authInfoHandler:   authInfoHandler,
 		shutdownCh:        make(chan struct{}),
 	}
+}
+
+// SetNamedMiddlewares sets named middlewares for logging purposes.
+func (t *HTTPTransport) SetNamedMiddlewares(namedMiddlewares []types.NamedMiddleware) {
+	t.namedMiddlewares = namedMiddlewares
 }
 
 // SetRemoteURL sets the remote URL for the MCP server
@@ -314,6 +320,13 @@ func (t *HTTPTransport) Start(ctx context.Context) error {
 	if t.remoteURL != "" && t.tokenSource != nil {
 		tokenMiddleware := t.createTokenInjectionMiddleware()
 		middlewares = append(middlewares, tokenMiddleware)
+		
+		// Add to named middlewares for logging
+		tokenNamedMiddleware := types.NamedMiddleware{
+			Name:     "oauth-token-injection",
+			Function: tokenMiddleware,
+		}
+		t.namedMiddlewares = append(t.namedMiddlewares, tokenNamedMiddleware)
 	}
 
 	// Create the transparent proxy
@@ -324,6 +337,12 @@ func (t *HTTPTransport) Start(ctx context.Context) error {
 		t.remoteURL != "",
 		string(t.transportType),
 		middlewares...)
+	
+	// Set named middlewares for logging if available
+	if transparentProxy, ok := t.proxy.(*transparent.TransparentProxy); ok && len(t.namedMiddlewares) > 0 {
+		transparentProxy.SetNamedMiddlewares(t.namedMiddlewares)
+	}
+	
 	if err := t.proxy.Start(ctx); err != nil {
 		return err
 	}

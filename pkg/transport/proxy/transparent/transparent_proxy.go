@@ -45,6 +45,9 @@ type TransparentProxy struct {
 
 	// Middleware chain
 	middlewares []types.MiddlewareFunction
+	
+	// Named middleware chain for logging
+	namedMiddlewares []types.NamedMiddleware
 
 	// Mutex for protecting shared state
 	mutex sync.Mutex
@@ -111,6 +114,11 @@ func NewTransparentProxy(
 	}
 
 	return proxy
+}
+
+// SetNamedMiddlewares sets the named middlewares for logging purposes.
+func (p *TransparentProxy) SetNamedMiddlewares(namedMiddlewares []types.NamedMiddleware) {
+	p.namedMiddlewares = namedMiddlewares
 }
 
 type tracingTransport struct {
@@ -311,8 +319,12 @@ func (p *TransparentProxy) Start(ctx context.Context) error {
 	var finalHandler http.Handler = handler
 	for i := len(p.middlewares) - 1; i >= 0; i-- {
 		finalHandler = p.middlewares[i](finalHandler)
-		// TODO: we should really log the middleware name here
-		logger.Infof("Applied middleware %d", i+1)
+		// Log middleware name if available, otherwise fall back to number
+		if len(p.namedMiddlewares) > i && p.namedMiddlewares[i].Name != "" {
+			logger.Infof("Applied middleware: %s", p.namedMiddlewares[i].Name)
+		} else {
+			logger.Infof("Applied middleware %d", i+1)
+		}
 	}
 
 	// Add the proxy handler for all paths except /health

@@ -17,15 +17,17 @@ func NewFactory() *Factory {
 
 // Create creates a transport based on the provided configuration
 func (*Factory) Create(config types.Config) (types.Transport, error) {
+	var transport types.Transport
+	
 	switch config.Type {
 	case types.TransportTypeStdio:
 		tr := NewStdioTransport(
 			config.Host, config.ProxyPort, config.Deployer, config.Debug, config.PrometheusHandler, config.Middlewares...,
 		)
 		tr.SetProxyMode(config.ProxyMode)
-		return tr, nil
+		transport = tr
 	case types.TransportTypeSSE:
-		return NewHTTPTransport(
+		transport = NewHTTPTransport(
 			types.TransportTypeSSE,
 			config.Host,
 			config.ProxyPort,
@@ -36,9 +38,9 @@ func (*Factory) Create(config types.Config) (types.Transport, error) {
 			config.AuthInfoHandler,
 			config.PrometheusHandler,
 			config.Middlewares...,
-		), nil
+		)
 	case types.TransportTypeStreamableHTTP:
-		return NewHTTPTransport(
+		transport = NewHTTPTransport(
 			types.TransportTypeStreamableHTTP,
 			config.Host,
 			config.ProxyPort,
@@ -49,11 +51,18 @@ func (*Factory) Create(config types.Config) (types.Transport, error) {
 			config.AuthInfoHandler,
 			config.PrometheusHandler,
 			config.Middlewares...,
-		), nil
+		)
 	case types.TransportTypeInspector:
 		// HTTP transport is not implemented yet
 		return nil, errors.ErrUnsupportedTransport
 	default:
 		return nil, errors.ErrUnsupportedTransport
 	}
+	
+	// Set named middlewares if the transport supports it and they are available
+	if namedSupport, ok := transport.(types.NamedMiddlewareSupport); ok && len(config.NamedMiddlewares) > 0 {
+		namedSupport.SetNamedMiddlewares(config.NamedMiddlewares)
+	}
+	
+	return transport, nil
 }

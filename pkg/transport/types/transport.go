@@ -20,6 +20,12 @@ import (
 // MiddlewareFunction is a function that wraps an http.Handler with additional functionality.
 type MiddlewareFunction func(http.Handler) http.Handler
 
+// NamedMiddleware pairs a middleware function with its name for logging purposes.
+type NamedMiddleware struct {
+	Name     string
+	Function MiddlewareFunction
+}
+
 // Middleware defines a middleware interceptor and a close method.
 type Middleware interface {
 	// Handler returns the middleware function used by the proxy.
@@ -77,6 +83,11 @@ type RunnerConfig interface {
 // MiddlewareFactory is a function that creates a Middleware instance based on the provided configuration
 // and configures the runner with the middleware and any additional handlers it provides.
 type MiddlewareFactory func(config *MiddlewareConfig, runner MiddlewareRunner) error
+
+// NamedMiddlewareSupport is an optional interface for transports that support named middleware logging.
+type NamedMiddlewareSupport interface {
+	SetNamedMiddlewares(namedMiddlewares []NamedMiddleware)
+}
 
 // Transport defines the interface for MCP transport implementations.
 // It provides methods for handling communication between the client and server.
@@ -194,6 +205,10 @@ type Config struct {
 	// Middlewares is a list of middleware functions to apply to the transport.
 	// These are applied in order, with the first middleware being the outermost wrapper.
 	Middlewares []MiddlewareFunction
+
+	// NamedMiddlewares is a list of named middleware functions for logging purposes.
+	// This provides the same functionality as Middlewares but includes names for better logging.
+	NamedMiddlewares []NamedMiddleware
 
 	// PrometheusHandler is an optional HTTP handler for Prometheus metrics endpoint.
 	// If provided, it will be exposed at /metrics on the transport's HTTP server.
