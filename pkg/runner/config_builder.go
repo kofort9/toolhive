@@ -22,6 +22,16 @@ import (
 	"github.com/stacklok/toolhive/pkg/transport/types"
 )
 
+// BuildContext defines the context in which the RunConfigBuilder is being used
+type BuildContext int
+
+const (
+	// BuildContextCLI indicates the builder is being used in CLI context with full validation
+	BuildContextCLI BuildContext = iota
+	// BuildContextOperator indicates the builder is being used in Kubernetes operator context
+	BuildContextOperator
+)
+
 // RunConfigBuilder provides a fluent interface for building RunConfig instances
 type RunConfigBuilder struct {
 	config *RunConfig
@@ -30,21 +40,38 @@ type RunConfigBuilder struct {
 	// Store ports separately for proper validation
 	port       int
 	targetPort int
+	// Build context determines which validation and features are enabled
+	buildContext BuildContext
 }
 
-// NewRunConfigBuilder creates a new RunConfigBuilder with default values
+// NewRunConfigBuilder creates a new RunConfigBuilder with default values for CLI use
 func NewRunConfigBuilder() *RunConfigBuilder {
 	return &RunConfigBuilder{
 		config: &RunConfig{
 			ContainerLabels: make(map[string]string),
 			EnvVars:         make(map[string]string),
 		},
+		buildContext: BuildContextCLI,
 	}
 }
 
-// WithRuntime sets the container runtime
+// NewOperatorRunConfigBuilder creates a new RunConfigBuilder configured for operator use
+func NewOperatorRunConfigBuilder() *RunConfigBuilder {
+	return &RunConfigBuilder{
+		config: &RunConfig{
+			ContainerLabels: make(map[string]string),
+			EnvVars:         make(map[string]string),
+		},
+		buildContext: BuildContextOperator,
+	}
+}
+
+// WithRuntime sets the container runtime (only used in CLI context)
 func (b *RunConfigBuilder) WithRuntime(deployer rt.Deployer) *RunConfigBuilder {
-	b.config.Deployer = deployer
+	// Only set deployer in CLI context
+	if b.buildContext == BuildContextCLI {
+		b.config.Deployer = deployer
+	}
 	return b
 }
 
@@ -201,7 +228,7 @@ func (b *RunConfigBuilder) WithLabels(labelStrings []string) *RunConfigBuilder {
 
 	// Parse and add each label
 	for _, labelString := range labelStrings {
-		key, value, err := labels.ParseLabelWithValidation(labelString)
+		key, value, err := labels.ParseLabel(labelString)
 		if err != nil {
 			logger.Warnf("Skipping invalid label: %s (%v)", labelString, err)
 			continue
@@ -264,7 +291,8 @@ func (b *RunConfigBuilder) WithOIDCConfig(
 
 // WithTelemetryConfig configures telemetry settings
 func (b *RunConfigBuilder) WithTelemetryConfig(otelEndpoint string, otelEnablePrometheusMetricsPath bool,
-	otelServiceName string, otelSamplingRate float64, otelHeaders []string, otelInsecure bool,
+	otelTracingEnabled bool, otelMetricsEnabled bool, otelServiceName string, otelSamplingRate float64,
+	otelHeaders []string, otelInsecure bool,
 	otelEnvironmentVariables []string) *RunConfigBuilder {
 
 	if otelEndpoint == "" && !otelEnablePrometheusMetricsPath {
@@ -303,6 +331,8 @@ func (b *RunConfigBuilder) WithTelemetryConfig(otelEndpoint string, otelEnablePr
 		Endpoint:                    otelEndpoint,
 		ServiceName:                 serviceName,
 		ServiceVersion:              telemetry.DefaultConfig().ServiceVersion,
+		TracingEnabled:              otelTracingEnabled,
+		MetricsEnabled:              otelMetricsEnabled,
 		SamplingRate:                otelSamplingRate,
 		Headers:                     headers,
 		Insecure:                    otelInsecure,
@@ -318,17 +348,9 @@ func (b *RunConfigBuilder) WithToolsFilter(toolsFilter []string) *RunConfigBuild
 	return b
 }
 
-// WithToolOverride sets the tool override map for the RunConfig
-// This method is mutually exclusive with WithToolOverrideFile
-func (b *RunConfigBuilder) WithToolOverride(toolOverride map[string]ToolOverride) *RunConfigBuilder {
-	b.config.ToolOverride = toolOverride
-	return b
-}
-
-// WithToolOverrideFile sets the path to the tool override file for the RunConfig
-// This method is mutually exclusive with WithToolOverride
-func (b *RunConfigBuilder) WithToolOverrideFile(toolOverrideFile string) *RunConfigBuilder {
-	b.config.ToolOverrideFile = toolOverrideFile
+// WithToolsOverride sets the tools override
+func (b *RunConfigBuilder) WithToolsOverride(overrides map[string]ToolOverride) *RunConfigBuilder {
+	b.config.ToolsOverride = overrides
 	return b
 }
 
@@ -342,6 +364,7 @@ func (b *RunConfigBuilder) WithIgnoreConfig(ignoreConfig *ignore.Config) *RunCon
 func (b *RunConfigBuilder) WithMiddlewareFromFlags(
 	oidcConfig *auth.TokenValidatorConfig,
 	toolsFilter []string,
+	toolsOverride map[string]ToolOverride,
 	telemetryConfig *telemetry.Config,
 	authzConfigPath string,
 	enableAudit bool,
@@ -351,16 +374,26 @@ func (b *RunConfigBuilder) WithMiddlewareFromFlags(
 ) *RunConfigBuilder {
 	var middlewareConfigs []types.MiddlewareConfig
 
+	// NOTE: order matters here. Specifically, these routines use append
+	// to add new middleware configs, but once these routines are called,
+	// inside the proxy, they are applied in reverse order, so the first
+	// being added here is effectively the last being called at HTTP
+	// request time.
+	//
+	// We should avoid doing this and a better pattern would be to let the
+	// actual proxy determine the order of application of middlewares, since
+	// the types of middleware are known at compile time.
+
 	// Add tool filter middlewares
-	middlewareConfigs = b.addToolFilterMiddlewares(middlewareConfigs, toolsFilter)
+	middlewareConfigs = addToolFilterMiddlewares(middlewareConfigs, toolsFilter, toolsOverride)
 
 	// Add core middlewares (always present)
-	middlewareConfigs = b.addCoreMiddlewares(middlewareConfigs, oidcConfig)
+	middlewareConfigs = addCoreMiddlewares(middlewareConfigs, oidcConfig)
 
 	// Add optional middlewares
-	middlewareConfigs = b.addTelemetryMiddleware(middlewareConfigs, telemetryConfig, serverName, transportType)
-	middlewareConfigs = b.addAuthzMiddleware(middlewareConfigs, authzConfigPath)
-	middlewareConfigs = b.addAuditMiddleware(middlewareConfigs, enableAudit, auditConfigPath, serverName)
+	middlewareConfigs = addTelemetryMiddleware(middlewareConfigs, telemetryConfig, serverName, transportType)
+	middlewareConfigs = addAuthzMiddleware(middlewareConfigs, authzConfigPath)
+	middlewareConfigs = addAuditMiddleware(middlewareConfigs, enableAudit, auditConfigPath, serverName)
 
 	// Set the populated middleware configs
 	b.config.MiddlewareConfigs = middlewareConfigs
@@ -368,15 +401,26 @@ func (b *RunConfigBuilder) WithMiddlewareFromFlags(
 }
 
 // addToolFilterMiddlewares adds tool filter middlewares if tools filter is provided
-func (*RunConfigBuilder) addToolFilterMiddlewares(
-	middlewareConfigs []types.MiddlewareConfig, toolsFilter []string,
+func addToolFilterMiddlewares(
+	middlewareConfigs []types.MiddlewareConfig,
+	toolsFilter []string,
+	toolsOverride map[string]ToolOverride,
 ) []types.MiddlewareConfig {
 	if len(toolsFilter) == 0 {
 		return middlewareConfigs
 	}
 
+	overrides := make(map[string]mcp.ToolOverride)
+	for actualName, tool := range toolsOverride {
+		overrides[actualName] = mcp.ToolOverride{
+			Name:        tool.Name,
+			Description: tool.Description,
+		}
+	}
+
 	toolFilterParams := mcp.ToolFilterMiddlewareParams{
-		FilterTools: toolsFilter,
+		FilterTools:   toolsFilter,
+		ToolsOverride: overrides,
 	}
 
 	// Add tool filter middleware
@@ -393,7 +437,7 @@ func (*RunConfigBuilder) addToolFilterMiddlewares(
 }
 
 // addCoreMiddlewares adds core middlewares that are always present
-func (*RunConfigBuilder) addCoreMiddlewares(
+func addCoreMiddlewares(
 	middlewareConfigs []types.MiddlewareConfig, oidcConfig *auth.TokenValidatorConfig,
 ) []types.MiddlewareConfig {
 	// Authentication middleware (always present)
@@ -414,7 +458,7 @@ func (*RunConfigBuilder) addCoreMiddlewares(
 }
 
 // addTelemetryMiddleware adds telemetry middleware if enabled
-func (*RunConfigBuilder) addTelemetryMiddleware(
+func addTelemetryMiddleware(
 	middlewareConfigs []types.MiddlewareConfig,
 	telemetryConfig *telemetry.Config,
 	serverName, transportType string,
@@ -436,7 +480,7 @@ func (*RunConfigBuilder) addTelemetryMiddleware(
 }
 
 // addAuthzMiddleware adds authorization middleware if config path is provided
-func (*RunConfigBuilder) addAuthzMiddleware(
+func addAuthzMiddleware(
 	middlewareConfigs []types.MiddlewareConfig, authzConfigPath string,
 ) []types.MiddlewareConfig {
 	if authzConfigPath == "" {
@@ -461,7 +505,7 @@ func (*RunConfigBuilder) addAuthzMiddleware(
 }
 
 // addAuditMiddleware adds audit middleware if enabled or config path is provided
-func (*RunConfigBuilder) addAuditMiddleware(
+func addAuditMiddleware(
 	middlewareConfigs []types.MiddlewareConfig,
 	enableAudit bool,
 	auditConfigPath, serverName string,
@@ -619,6 +663,12 @@ func (b *RunConfigBuilder) validateConfig(imageMetadata *registry.ImageMetadata)
 		}
 	}
 
+	for toolName, tool := range c.ToolsOverride {
+		if tool.Name == "" && tool.Description == "" {
+			return fmt.Errorf("tool override for %s must have either Name or Description set", toolName)
+		}
+	}
+
 	if c.ToolsFilter != nil && imageMetadata != nil && imageMetadata.Tools != nil {
 		logger.Debugf("Using tools filter: %v", c.ToolsFilter)
 		for _, tool := range c.ToolsFilter {
@@ -628,16 +678,11 @@ func (b *RunConfigBuilder) validateConfig(imageMetadata *registry.ImageMetadata)
 		}
 	}
 
-	// Validate tool overrides - ensure they are mutually exclusive
-	if len(c.ToolOverride) > 0 && c.ToolOverrideFile != "" {
-		return fmt.Errorf("both tool override map and tool override file are set, they are mutually exclusive")
-	}
-
-	// Validate tool override map entries if present
-	if len(c.ToolOverride) > 0 {
-		for toolName, override := range c.ToolOverride {
-			if override.Name == "" && override.Description == "" {
-				return fmt.Errorf("tool override for %s must have either Name or Description set", toolName)
+	if c.ToolsOverride != nil && imageMetadata != nil && imageMetadata.Tools != nil {
+		logger.Debugf("Using tools override: %v", c.ToolsOverride)
+		for toolName := range c.ToolsOverride {
+			if !slices.Contains(imageMetadata.Tools, toolName) {
+				return fmt.Errorf("tool %s not found in registry", toolName)
 			}
 		}
 	}
@@ -743,6 +788,37 @@ func (b *RunConfigBuilder) processVolumeMounts() error {
 	}
 
 	return nil
+}
+
+// BuildForOperator creates a RunConfig for operator use, using the same validation as CLI
+func (b *RunConfigBuilder) BuildForOperator() (*RunConfig, error) {
+	if b.buildContext != BuildContextOperator {
+		return nil, fmt.Errorf("BuildForOperator can only be used with BuildContextOperator")
+	}
+
+	// Set build context on the config to control validation behavior
+	b.config.buildContext = BuildContextOperator
+
+	// Use the same validation logic as CLI, but without image metadata (pass nil)
+	if err := b.validateConfig(nil); err != nil {
+		return nil, fmt.Errorf("failed to validate run config: %w", err)
+	}
+
+	// Set schema version
+	b.config.SchemaVersion = CurrentSchemaVersion
+
+	return b.config, nil
+}
+
+// WithEnvVars sets environment variables from a map
+func (b *RunConfigBuilder) WithEnvVars(envVars map[string]string) *RunConfigBuilder {
+	if b.config.EnvVars == nil {
+		b.config.EnvVars = make(map[string]string)
+	}
+	for key, value := range envVars {
+		b.config.EnvVars[key] = value
+	}
+	return b
 }
 
 // WithEnvFile adds environment variables from a single file

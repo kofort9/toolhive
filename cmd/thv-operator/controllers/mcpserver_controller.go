@@ -116,6 +116,22 @@ func (r *MCPServerReconciler) detectPlatform(ctx context.Context) (kubernetes.Pl
 	return r.detectedPlatform, err
 }
 
+// +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=create;delete;get;list;patch;update;watch;apply
+// +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete;apply
+// +kubebuilder:rbac:groups="",resources=pods/attach,verbs=create;get
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 //
@@ -182,6 +198,12 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Ensure authorization ConfigMap for inline configuration
 	if err := r.ensureAuthzConfigMap(ctx, mcpServer); err != nil {
 		ctxLogger.Error(err, "Failed to ensure authorization ConfigMap")
+		return ctrl.Result{}, err
+	}
+
+	// Ensure RunConfig ConfigMap exists and is up to date
+	if err := r.ensureRunConfigConfigMap(ctx, mcpServer); err != nil {
+		ctxLogger.Error(err, "Failed to ensure RunConfig ConfigMap")
 		return ctrl.Result{}, err
 	}
 
@@ -499,6 +521,11 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		args = append(args, authzArgs...)
 	}
 
+	// Add audit configuration args
+	if m.Spec.Audit != nil && m.Spec.Audit.Enabled {
+		args = append(args, "--enable-audit")
+	}
+
 	// Add environment variables as --env flags for the MCP server
 	for _, e := range m.Spec.Env {
 		args = append(args, fmt.Sprintf("--env=%s=%s", e.Name, e.Value))
@@ -625,6 +652,9 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 	deploymentLabels := ls
 	deploymentAnnotations := make(map[string]string)
 
+	deploymentTemplateLabels := ls
+	deploymentTemplateAnnotations := make(map[string]string)
+
 	if m.Spec.ResourceOverrides != nil && m.Spec.ResourceOverrides.ProxyDeployment != nil {
 		if m.Spec.ResourceOverrides.ProxyDeployment.Labels != nil {
 			deploymentLabels = mergeLabels(ls, m.Spec.ResourceOverrides.ProxyDeployment.Labels)
@@ -632,6 +662,21 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		if m.Spec.ResourceOverrides.ProxyDeployment.Annotations != nil {
 			deploymentAnnotations = mergeAnnotations(make(map[string]string), m.Spec.ResourceOverrides.ProxyDeployment.Annotations)
 		}
+
+		if m.Spec.ResourceOverrides.ProxyDeployment.PodTemplateMetadataOverrides != nil {
+			if m.Spec.ResourceOverrides.ProxyDeployment.PodTemplateMetadataOverrides.Labels != nil {
+				deploymentLabels = mergeLabels(ls, m.Spec.ResourceOverrides.ProxyDeployment.PodTemplateMetadataOverrides.Labels)
+			}
+			if m.Spec.ResourceOverrides.ProxyDeployment.PodTemplateMetadataOverrides.Annotations != nil {
+				deploymentTemplateAnnotations = mergeAnnotations(deploymentAnnotations,
+					m.Spec.ResourceOverrides.ProxyDeployment.PodTemplateMetadataOverrides.Annotations)
+			}
+		}
+	}
+
+	// Check for Vault Agent Injection and add env-file-dir argument if needed
+	if hasVaultAgentInjection(deploymentTemplateAnnotations) {
+		args = append(args, "--env-file-dir=/vault/secrets")
 	}
 
 	// Detect platform and prepare ProxyRunner's pod and container security context
@@ -662,7 +707,8 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: ls, // Keep original labels for pod template
+					Labels:      deploymentTemplateLabels,
+					Annotations: deploymentTemplateAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: proxyRunnerServiceAccountName(m.Name),
@@ -720,11 +766,12 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 }
 
 func ensureRequiredEnvVars(env []corev1.EnvVar) []corev1.EnvVar {
-	// Check for the existence of the XDG_CONFIG_HOME, HOME, and TOOLHIVE_RUNTIME environment variables
+	// Check for the existence of the XDG_CONFIG_HOME, HOME, TOOLHIVE_RUNTIME, and UNSTRUCTURED_LOGS environment variables
 	// and set them to defaults if they don't exist
 	xdgConfigHomeFound := false
 	homeFound := false
 	toolhiveRuntimeFound := false
+	unstructuredLogsFound := false
 	for _, envVar := range env {
 		if envVar.Name == "XDG_CONFIG_HOME" {
 			xdgConfigHomeFound = true
@@ -734,6 +781,9 @@ func ensureRequiredEnvVars(env []corev1.EnvVar) []corev1.EnvVar {
 		}
 		if envVar.Name == "TOOLHIVE_RUNTIME" {
 			toolhiveRuntimeFound = true
+		}
+		if envVar.Name == "UNSTRUCTURED_LOGS" {
+			unstructuredLogsFound = true
 		}
 	}
 	if !xdgConfigHomeFound {
@@ -755,6 +805,14 @@ func ensureRequiredEnvVars(env []corev1.EnvVar) []corev1.EnvVar {
 		env = append(env, corev1.EnvVar{
 			Name:  "TOOLHIVE_RUNTIME",
 			Value: "kubernetes",
+		})
+	}
+	// Always use structured JSON logs in Kubernetes (not configurable)
+	if !unstructuredLogsFound {
+		logger.Debugf("UNSTRUCTURED_LOGS not found, setting to false for structured JSON logging")
+		env = append(env, corev1.EnvVar{
+			Name:  "UNSTRUCTURED_LOGS",
+			Value: "false",
 		})
 	}
 	return env
@@ -900,6 +958,20 @@ func (r *MCPServerReconciler) finalizeMCPServer(ctx context.Context, m *mcpv1alp
 	} else if !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to check Service %s: %w", serviceName, err)
 	}
+
+	// Step 4: Delete associated RunConfig ConfigMap
+	runConfigName := fmt.Sprintf("%s-runconfig", m.Name)
+	runConfigMap := &corev1.ConfigMap{}
+	err = r.Get(ctx, types.NamespacedName{Name: runConfigName, Namespace: m.Namespace}, runConfigMap)
+	if err == nil {
+		if delErr := r.Delete(ctx, runConfigMap); delErr != nil && !errors.IsNotFound(delErr) {
+			return fmt.Errorf("failed to delete RunConfig ConfigMap %s: %w", runConfigName, delErr)
+		}
+		ctxLogger.Info("Deleted RunConfig ConfigMap", "name", runConfigName, "namespace", m.Namespace)
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check RunConfig ConfigMap %s: %w", runConfigName, err)
+	}
+
 	// The owner references will automatically delete the deployment and service
 	// when the MCPServer is deleted, so we don't need to do anything here.
 	return nil
@@ -1310,11 +1382,22 @@ func mergeAnnotations(defaultAnnotations, overrideAnnotations map[string]string)
 	return mergeStringMaps(defaultAnnotations, overrideAnnotations)
 }
 
+// hasVaultAgentInjection checks if Vault Agent Injection is enabled in the pod annotations
+func hasVaultAgentInjection(annotations map[string]string) bool {
+	if annotations == nil {
+		return false
+	}
+
+	// Check if vault.hashicorp.com/agent-inject annotation is present and set to "true"
+	value, exists := annotations["vault.hashicorp.com/agent-inject"]
+	return exists && value == "true"
+}
+
 // getProxyHost returns the host to bind the proxy to
 func getProxyHost() string {
 	host := os.Getenv("TOOLHIVE_PROXY_HOST")
 	if host == "" {
-		host = "0.0.0.0"
+		host = defaultProxyHost
 	}
 	return host
 }
@@ -1600,6 +1683,25 @@ func (*MCPServerReconciler) generateOpenTelemetryArgs(m *mcpv1alpha1.MCPServer) 
 	// Add insecure flag
 	if otel.Insecure {
 		args = append(args, "--otel-insecure")
+	}
+
+	// Handle tracing configuration
+	if otel.Tracing != nil {
+		if otel.Tracing.Enabled {
+			args = append(args, "--otel-tracing-enabled=true")
+			args = append(args, fmt.Sprintf("--otel-tracing-sampling-rate=%s", otel.Tracing.SamplingRate))
+		} else {
+			args = append(args, "--otel-tracing-enabled=false")
+		}
+	}
+
+	// Handle metrics configuration
+	if otel.Metrics != nil {
+		if otel.Metrics.Enabled {
+			args = append(args, "--otel-metrics-enabled=true")
+		} else {
+			args = append(args, "--otel-metrics-enabled=false")
+		}
 	}
 
 	return args

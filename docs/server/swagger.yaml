@@ -124,6 +124,7 @@ components:
       - AmpVSCodeInsider
       - AmpWindsurf
       - LMStudio
+      - Goose
     client.MCPClientStatus:
       properties:
         client_type:
@@ -144,6 +145,7 @@ components:
           - AmpVSCodeInsider
           - AmpWindsurf
           - LMStudio
+          - Goose
         installed:
           description: Installed indicates whether the client is installed on the
             system
@@ -783,24 +785,18 @@ components:
           description: ThvCABundle is the path to the CA certificate bundle for ToolHive
             HTTP operations
           type: string
-        tool_override:
-          additionalProperties:
-            $ref: '#/components/schemas/runner.ToolOverride'
-          description: |-
-            ToolOverride is the map of tool names to override. Tools to override are
-            specified as ToolOverride structs.
-          type: object
-        tool_override_file:
-          description: |-
-            ToolOverrideFile is the path to a file containing tool overrides.
-            The file is a JSON struct mapping actual names to ToolOverride structs.
-          type: string
         tools_filter:
           description: ToolsFilter is the list of tools to filter
           items:
             type: string
           type: array
           uniqueItems: false
+        tools_override:
+          additionalProperties:
+            $ref: '#/components/schemas/runner.ToolOverride'
+          description: ToolsOverride is a map from an actual tool to its overridden
+            name and/or description
+          type: object
         transport:
           description: Transport is the transport mode (stdio, sse, or streamable-http)
           type: string
@@ -867,6 +863,7 @@ components:
           items:
             type: string
           type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -876,8 +873,16 @@ components:
           description: Insecure indicates whether to use HTTP instead of HTTPS for
             the OTLP endpoint
           type: boolean
+        metricsEnabled:
+          description: |-
+            MetricsEnabled controls whether OTLP metrics are enabled
+            When false, OTLP metrics are not sent even if an endpoint is configured
+            This is independent of EnablePrometheusMetricsPath
+          type: boolean
         samplingRate:
-          description: SamplingRate is the trace sampling rate (0.0-1.0)
+          description: |-
+            SamplingRate is the trace sampling rate (0.0-1.0)
+            Only used when TracingEnabled is true
           type: number
         serviceName:
           description: ServiceName is the service name for telemetry
@@ -885,6 +890,11 @@ components:
         serviceVersion:
           description: ServiceVersion is the service version for telemetry
           type: string
+        tracingEnabled:
+          description: |-
+            TracingEnabled controls whether distributed tracing is enabled
+            When false, no tracer provider is created even if an endpoint is configured
+          type: boolean
       type: object
     types.MiddlewareConfig:
       properties:
@@ -968,6 +978,7 @@ components:
             - AmpVSCodeInsider
             - AmpWindsurf
             - LMStudio
+            - Goose
           type: array
           uniqueItems: false
       type: object
@@ -1017,6 +1028,7 @@ components:
           - AmpVSCodeInsider
           - AmpWindsurf
           - LMStudio
+          - Goose
       type: object
     v1.createClientResponse:
       properties:
@@ -1044,6 +1056,7 @@ components:
           - AmpVSCodeInsider
           - AmpWindsurf
           - LMStudio
+          - Goose
       type: object
     v1.createGroupRequest:
       properties:
@@ -1077,6 +1090,11 @@ components:
         group:
           description: Group name this workload belongs to
           type: string
+        headers:
+          items:
+            $ref: '#/components/schemas/registry.Header'
+          type: array
+          uniqueItems: false
         host:
           description: Host to bind to
           type: string
@@ -1090,6 +1108,8 @@ components:
           description: Whether network isolation is turned on. This applies the rules
             in the permission profile.
           type: boolean
+        oauth_config:
+          $ref: '#/components/schemas/v1.remoteOAuthConfig'
         oidc:
           $ref: '#/components/schemas/v1.oidcOptions'
         permission_profile:
@@ -1112,8 +1132,16 @@ components:
             type: string
           type: array
           uniqueItems: false
+        tools_override:
+          additionalProperties:
+            $ref: '#/components/schemas/v1.toolOverride'
+          description: Tools override
+          type: object
         transport:
           description: Transport configuration
+          type: string
+        url:
+          description: Remote server specific fields
           type: string
         volumes:
           description: Volume mounts
@@ -1312,6 +1340,47 @@ components:
           type: array
           uniqueItems: false
       type: object
+    v1.remoteOAuthConfig:
+      description: OAuth configuration for remote server authentication
+      properties:
+        authorize_url:
+          description: OAuth authorization endpoint URL (alternative to issuer for
+            non-OIDC OAuth)
+          type: string
+        callback_port:
+          description: Specific port for OAuth callback server
+          type: integer
+        client_id:
+          description: OAuth client ID for authentication
+          type: string
+        client_secret:
+          $ref: '#/components/schemas/secrets.SecretParameter'
+        issuer:
+          description: OAuth/OIDC issuer URL (e.g., https://accounts.google.com)
+          type: string
+        oauth_params:
+          additionalProperties:
+            type: string
+          description: Additional OAuth parameters for server-specific customization
+          type: object
+        scopes:
+          description: OAuth scopes to request
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        skip_browser:
+          description: Whether to skip opening browser for OAuth flow (defaults to
+            false)
+          type: boolean
+        token_url:
+          description: OAuth token endpoint URL (alternative to issuer for non-OIDC
+            OAuth)
+          type: string
+        use_pkce:
+          description: Whether to use PKCE for the OAuth flow
+          type: boolean
+      type: object
     v1.secretKeyResponse:
       description: Secret key information
       properties:
@@ -1344,6 +1413,16 @@ components:
           description: Type of the secrets provider that was setup
           type: string
       type: object
+    v1.toolOverride:
+      description: Tool override
+      properties:
+        description:
+          description: Description of the tool
+          type: string
+        name:
+          description: Name of the tool
+          type: string
+      type: object
     v1.updateRequest:
       description: Request to update an existing workload (name cannot be changed)
       properties:
@@ -1364,6 +1443,11 @@ components:
         group:
           description: Group name this workload belongs to
           type: string
+        headers:
+          items:
+            $ref: '#/components/schemas/registry.Header'
+          type: array
+          uniqueItems: false
         host:
           description: Host to bind to
           type: string
@@ -1374,6 +1458,8 @@ components:
           description: Whether network isolation is turned on. This applies the rules
             in the permission profile.
           type: boolean
+        oauth_config:
+          $ref: '#/components/schemas/v1.remoteOAuthConfig'
         oidc:
           $ref: '#/components/schemas/v1.oidcOptions'
         permission_profile:
@@ -1396,8 +1482,16 @@ components:
             type: string
           type: array
           uniqueItems: false
+        tools_override:
+          additionalProperties:
+            $ref: '#/components/schemas/v1.toolOverride'
+          description: Tools override
+          type: object
         transport:
           description: Transport configuration
+          type: string
+        url:
+          description: Remote server specific fields
           type: string
         volumes:
           description: Volume mounts
