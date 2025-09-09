@@ -1,8 +1,9 @@
-package controllers
+package operator_test
 
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -20,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	mcpv1alpha1 "github.com/stacklok/toolhive/cmd/thv-operator/api/v1alpha1"
+	"github.com/stacklok/toolhive/cmd/thv-operator/controllers"
 	"github.com/stacklok/toolhive/pkg/container/kubernetes"
 )
 
@@ -40,8 +43,10 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	By("bootstrapping test environment")
+	
+	// Use the KUBEBUILDER_ASSETS environment variable if set, otherwise try common locations
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "cmd", "thv-operator", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -67,11 +72,12 @@ var _ = BeforeSuite(func() {
 		platform: kubernetes.PlatformKubernetes,
 	}
 
-	err = (&MCPServerReconciler{
-		Client:           k8sManager.GetClient(),
-		Scheme:           k8sManager.GetScheme(),
-		platformDetector: mockDetector,
-	}).SetupWithManager(k8sManager)
+	reconciler := NewMCPServerReconcilerWithMockDetector(
+		k8sManager.GetClient(),
+		k8sManager.GetScheme(),
+		mockDetector,
+	)
+	err = reconciler.SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {
@@ -153,4 +159,31 @@ func waitForMCPServerStatusUpdate(namespacedName client.ObjectKey, timeout time.
 		return mcpServer.Status.Phase != ""
 	}, timeout, time.Second).Should(BeTrue())
 	return mcpServer
+}
+
+// mockPlatformDetector is a mock implementation of PlatformDetector for testing
+type mockPlatformDetector struct {
+	platform kubernetes.Platform
+	err      error
+}
+
+func (m *mockPlatformDetector) DetectPlatform(_ *rest.Config) (kubernetes.Platform, error) {
+	return m.platform, m.err
+}
+
+// NewMCPServerReconcilerWithMockDetector creates an MCPServerReconciler with a mock platform detector for testing
+func NewMCPServerReconcilerWithMockDetector(client client.Client, scheme *runtime.Scheme, detector kubernetes.PlatformDetector) *controllers.MCPServerReconciler {
+	reconciler := &controllers.MCPServerReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+	
+	// Use reflection to set the unexported platformDetector field
+	reconcilerValue := reflect.ValueOf(reconciler).Elem()
+	platformDetectorField := reconcilerValue.FieldByName("platformDetector")
+	if platformDetectorField.IsValid() && platformDetectorField.CanSet() {
+		platformDetectorField.Set(reflect.ValueOf(detector))
+	}
+	
+	return reconciler
 }

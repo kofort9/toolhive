@@ -1,4 +1,4 @@
-package controllers
+package operator_test
 
 import (
 	"time"
@@ -41,9 +41,10 @@ var _ = Describe("MCPServer Controller E2E Tests", func() {
 					Namespace: testNamespace,
 				},
 				Spec: mcpv1alpha1.MCPServerSpec{
-					Image:     "test/mcp-server:latest",
-					Transport: "stdio",
-					Port:      8080,
+					Image:      "test/mcp-server:latest",
+					Transport:  "streamable-http",
+					Port:       8080,
+					TargetPort: 3000,
 				},
 			}
 			Expect(k8sClient.Create(ctx, mcpServer)).Should(Succeed())
@@ -77,7 +78,7 @@ var _ = Describe("MCPServer Controller E2E Tests", func() {
 
 			By("Checking the ServiceAccount is created")
 			saKey := types.NamespacedName{
-				Name:      mcpServer.Name + "-sa",
+				Name:      mcpServer.Name + "-proxy-runner",
 				Namespace: testNamespace,
 			}
 			waitForServiceAccountCreation(saKey, timeout)
