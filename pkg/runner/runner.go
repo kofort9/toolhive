@@ -140,7 +140,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Process secrets if provided
 	if len(r.Config.Secrets) > 0 {
-		cfg := config.GetConfig()
+		cfgprovider := config.NewDefaultProvider()
+		cfg := cfgprovider.GetConfig()
 
 		providerType, err := cfg.Secrets.GetProviderType()
 		if err != nil {
@@ -168,17 +169,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 
 		// Handle remote authentication if configured
-		if r.Config.RemoteAuthConfig != nil && (r.Config.RemoteAuthConfig.EnableRemoteAuth ||
-			r.Config.RemoteAuthConfig.ClientID != "") {
-			tokenSource, err := r.handleRemoteAuthentication(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to authenticate to remote server: %w", err)
-			}
+		tokenSource, err := r.handleRemoteAuthentication(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to authenticate to remote server: %w", err)
+		}
 
-			// Set the token source on the HTTP transport
-			if httpTransport, ok := transportHandler.(interface{ SetTokenSource(*oauth2.TokenSource) }); ok {
-				httpTransport.SetTokenSource(tokenSource)
-			}
+		// Set the token source on the HTTP transport
+		if httpTransport, ok := transportHandler.(interface{ SetTokenSource(*oauth2.TokenSource) }); ok {
+			httpTransport.SetTokenSource(tokenSource)
 		}
 
 		// For remote workloads, we don't need a deployer
@@ -209,7 +207,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		logger.Warnf("Warning: Failed to create client manager: %v", err)
 	} else {
 		transportType := labels.GetTransportType(r.Config.ContainerLabels)
-		serverURL := transport.GenerateMCPServerURL(transportType, "localhost", r.Config.Port, r.Config.ContainerName)
+		serverURL := transport.GenerateMCPServerURL(
+			transportType,
+			"localhost",
+			r.Config.Port,
+			r.Config.ContainerName,
+			r.Config.RemoteURL)
 
 		if err := clientManager.AddServerToClients(ctx, r.Config.ContainerName, serverURL, transportType, r.Config.Group); err != nil {
 			logger.Warnf("Warning: Failed to add server to client configurations: %v", err)
@@ -232,20 +235,28 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 
 		// Remove the PID file if it exists
+		// TODO: Stop writing to PID file once we migrate over to statuses.
 		if err := process.RemovePIDFile(r.Config.BaseName); err != nil {
 			logger.Warnf("Warning: Failed to remove PID file: %v", err)
+		}
+		if err := r.statusManager.ResetWorkloadPID(ctx, r.Config.ContainerName); err != nil {
+			logger.Warnf("Warning: Failed to reset workload %s PID: %v", r.Config.ContainerName, err)
 		}
 
 		logger.Infof("MCP server %s stopped", r.Config.ContainerName)
 	}
 
+	// TODO: Stop writing to PID file once we migrate over to statuses.
+	if err := process.WriteCurrentPIDFile(r.Config.BaseName); err != nil {
+		logger.Warnf("Warning: Failed to write PID file: %v", err)
+	}
+	if err := r.statusManager.SetWorkloadPID(ctx, r.Config.ContainerName, os.Getpid()); err != nil {
+		logger.Warnf("Warning: Failed to set workload PID: %v", err)
+	}
+
 	if process.IsDetached() {
 		// We're a detached process running in foreground mode
 		// Write the PID to a file so the stop command can kill the process
-		if err := process.WriteCurrentPIDFile(r.Config.BaseName); err != nil {
-			logger.Warnf("Warning: Failed to write PID file: %v", err)
-		}
-
 		logger.Infof("Running as detached process (PID: %d)", os.Getpid())
 	} else {
 		logger.Info("Press Ctrl+C to stop or wait for container to exit")
@@ -301,8 +312,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	case <-doneCh:
 		// The transport has already been stopped (likely by the container monitor)
 		// Clean up the PID file and state
+		// TODO: Stop writing to PID file once we migrate over to statuses.
 		if err := process.RemovePIDFile(r.Config.BaseName); err != nil {
 			logger.Warnf("Warning: Failed to remove PID file: %v", err)
+		}
+		if err := r.statusManager.ResetWorkloadPID(ctx, r.Config.ContainerName); err != nil {
+			logger.Warnf("Warning: Failed to reset workload %s PID: %v", r.Config.ContainerName, err)
 		}
 
 		logger.Infof("MCP server %s stopped", r.Config.ContainerName)

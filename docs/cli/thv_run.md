@@ -58,6 +58,15 @@ ToolHive supports five ways to run an MCP server:
    This allows remote MCP servers to be managed like local workloads with full
    support for client configuration, tool filtering, import/export, etc.
 
+#### Dynamic client registration
+
+When no client credentials are provided, ToolHive automatically registers an OAuth client
+with the authorization server using RFC 7591 dynamic client registration:
+
+- No need to pre-configure client ID and secret
+- Automatically discovers registration endpoint via OIDC
+- Supports PKCE flow for enhanced security
+
 The container will be started with the specified transport mode and
 permission profile. Additional configuration can be provided via flags.
 
@@ -98,8 +107,10 @@ thv run [flags] SERVER_OR_IMAGE_OR_PROTOCOL [-- ARGS...]
       --otel-env-vars stringArray               Environment variable names to include in OpenTelemetry spans (comma-separated: ENV1,ENV2)
       --otel-headers stringArray                OpenTelemetry OTLP headers in key=value format (e.g., x-honeycomb-team=your-api-key)
       --otel-insecure                           Connect to the OpenTelemetry endpoint using HTTP instead of HTTPS
+      --otel-metrics-enabled                    Enable OTLP metrics export (when OTLP endpoint is configured) (default true)
       --otel-sampling-rate float                OpenTelemetry trace sampling rate (0.0-1.0) (default 0.1)
       --otel-service-name string                OpenTelemetry service name (defaults to toolhive-mcp-proxy)
+      --otel-tracing-enabled                    Enable distributed tracing (when OTLP endpoint is configured) (default true)
       --permission-profile string               Permission profile to use (none, network, or path to JSON file)
       --print-resolved-overlays                 Debug: show resolved container paths for tmpfs overlays
       --proxy-mode string                       Proxy mode for stdio transport (sse or streamable-http) (default "sse")

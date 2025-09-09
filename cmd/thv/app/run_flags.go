@@ -70,6 +70,8 @@ type RunFlags struct {
 	// Telemetry configuration
 	OtelEndpoint                    string
 	OtelServiceName                 string
+	OtelTracingEnabled              bool
+	OtelMetricsEnabled              bool
 	OtelSamplingRate                float64
 	OtelHeaders                     []string
 	OtelInsecure                    bool
@@ -174,6 +176,10 @@ func AddRunFlags(cmd *cobra.Command, config *RunFlags) {
 		"OpenTelemetry OTLP endpoint URL (e.g., https://api.honeycomb.io)")
 	cmd.Flags().StringVar(&config.OtelServiceName, "otel-service-name", "",
 		"OpenTelemetry service name (defaults to toolhive-mcp-proxy)")
+	cmd.Flags().BoolVar(&config.OtelTracingEnabled, "otel-tracing-enabled", true,
+		"Enable distributed tracing (when OTLP endpoint is configured)")
+	cmd.Flags().BoolVar(&config.OtelMetricsEnabled, "otel-metrics-enabled", true,
+		"Enable OTLP metrics export (when OTLP endpoint is configured)")
 	cmd.Flags().Float64Var(&config.OtelSamplingRate, "otel-sampling-rate", 0.1, "OpenTelemetry trace sampling rate (0.0-1.0)")
 	cmd.Flags().StringArrayVar(&config.OtelHeaders, "otel-headers", nil,
 		"OpenTelemetry OTLP headers in key=value format (e.g., x-honeycomb-team=your-api-key)")
@@ -286,13 +292,14 @@ func setupOIDCConfiguration(cmd *cobra.Command, runFlags *RunFlags) (*auth.Token
 
 // setupTelemetryConfiguration sets up telemetry configuration with config fallbacks
 func setupTelemetryConfiguration(cmd *cobra.Command, runFlags *RunFlags) *telemetry.Config {
-	config := cfg.GetConfig()
+	configProvider := cfg.NewDefaultProvider()
+	config := configProvider.GetConfig()
 	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables := getTelemetryFromFlags(cmd, config,
 		runFlags.OtelEndpoint, runFlags.OtelSamplingRate, runFlags.OtelEnvironmentVariables)
 
 	return createTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath,
-		runFlags.OtelServiceName, finalOtelSamplingRate, runFlags.OtelHeaders, runFlags.OtelInsecure,
-		finalOtelEnvironmentVariables)
+		runFlags.OtelServiceName, runFlags.OtelTracingEnabled, runFlags.OtelMetricsEnabled, finalOtelSamplingRate,
+		runFlags.OtelHeaders, runFlags.OtelInsecure, finalOtelEnvironmentVariables)
 }
 
 // setupRuntimeAndValidation creates container runtime and selects environment variable validator
@@ -306,7 +313,8 @@ func setupRuntimeAndValidation(ctx context.Context) (runtime.Deployer, runner.En
 	if process.IsDetached() || runtime.IsKubernetesRuntime() {
 		envVarValidator = &runner.DetachedEnvVarValidator{}
 	} else {
-		envVarValidator = &runner.CLIEnvVarValidator{}
+		cfgProvider := cfg.NewDefaultProvider()
+		envVarValidator = runner.NewCLIEnvVarValidator(cfgProvider)
 	}
 
 	return rt, envVarValidator, nil
@@ -414,6 +422,7 @@ func buildRunnerConfig(
 	builder = builder.WithMiddlewareFromFlags(
 		oidcConfig,
 		runFlags.ToolsFilter,
+		nil,
 		telemetryConfig,
 		runFlags.AuthzConfig,
 		runFlags.EnableAudit,
@@ -448,7 +457,8 @@ func buildRunnerConfig(
 	// Set additional configurations that are still needed in old format for other parts of the system
 	builder = builder.WithOIDCConfig(oidcIssuer, oidcAudience, oidcJwksURL, oidcIntrospectionURL, oidcClientID, oidcClientSecret,
 		runFlags.ThvCABundle, runFlags.JWKSAuthTokenFile, runFlags.ResourceURL, runFlags.JWKSAllowPrivateIP).
-		WithTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath, runFlags.OtelServiceName,
+		WithTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath,
+			runFlags.OtelTracingEnabled, runFlags.OtelMetricsEnabled, runFlags.OtelServiceName,
 			finalOtelSamplingRate, runFlags.OtelHeaders, runFlags.OtelInsecure, finalOtelEnvironmentVariables).
 		WithToolsFilter(runFlags.ToolsFilter)
 
@@ -495,19 +505,18 @@ func getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata *registry.Remote
 
 	if remoteServerMetadata.OAuthConfig != nil {
 		return &runner.RemoteAuthConfig{
-			EnableRemoteAuth: runFlags.RemoteAuthFlags.EnableRemoteAuth || runFlags.RemoteAuthFlags.RemoteAuthClientID != "",
-			ClientID:         runFlags.RemoteAuthFlags.RemoteAuthClientID,
-			ClientSecret:     runFlags.RemoteAuthFlags.RemoteAuthClientSecret,
-			Scopes:           remoteServerMetadata.OAuthConfig.Scopes,
-			SkipBrowser:      runFlags.RemoteAuthFlags.RemoteAuthSkipBrowser,
-			Timeout:          runFlags.RemoteAuthFlags.RemoteAuthTimeout,
-			CallbackPort:     remoteServerMetadata.OAuthConfig.CallbackPort,
-			Issuer:           remoteServerMetadata.OAuthConfig.Issuer,
-			AuthorizeURL:     remoteServerMetadata.OAuthConfig.AuthorizeURL,
-			TokenURL:         remoteServerMetadata.OAuthConfig.TokenURL,
-			OAuthParams:      remoteServerMetadata.OAuthConfig.OAuthParams,
-			Headers:          remoteServerMetadata.Headers,
-			EnvVars:          remoteServerMetadata.EnvVars,
+			ClientID:     runFlags.RemoteAuthFlags.RemoteAuthClientID,
+			ClientSecret: runFlags.RemoteAuthFlags.RemoteAuthClientSecret,
+			Scopes:       remoteServerMetadata.OAuthConfig.Scopes,
+			SkipBrowser:  runFlags.RemoteAuthFlags.RemoteAuthSkipBrowser,
+			Timeout:      runFlags.RemoteAuthFlags.RemoteAuthTimeout,
+			CallbackPort: remoteServerMetadata.OAuthConfig.CallbackPort,
+			Issuer:       remoteServerMetadata.OAuthConfig.Issuer,
+			AuthorizeURL: remoteServerMetadata.OAuthConfig.AuthorizeURL,
+			TokenURL:     remoteServerMetadata.OAuthConfig.TokenURL,
+			OAuthParams:  remoteServerMetadata.OAuthConfig.OAuthParams,
+			Headers:      remoteServerMetadata.Headers,
+			EnvVars:      remoteServerMetadata.EnvVars,
 		}
 	}
 	return nil
@@ -515,21 +524,18 @@ func getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata *registry.Remote
 
 // getRemoteAuthFromRunFlags creates RemoteAuthConfig from RunFlags
 func getRemoteAuthFromRunFlags(runFlags *RunFlags) *runner.RemoteAuthConfig {
-	if runFlags.RemoteAuthFlags.EnableRemoteAuth || runFlags.RemoteAuthFlags.RemoteAuthClientID != "" {
-		return &runner.RemoteAuthConfig{
-			ClientID:     runFlags.RemoteAuthFlags.RemoteAuthClientID,
-			ClientSecret: runFlags.RemoteAuthFlags.RemoteAuthClientSecret,
-			Scopes:       runFlags.RemoteAuthFlags.RemoteAuthScopes,
-			SkipBrowser:  runFlags.RemoteAuthFlags.RemoteAuthSkipBrowser,
-			Timeout:      runFlags.RemoteAuthFlags.RemoteAuthTimeout,
-			CallbackPort: runFlags.RemoteAuthFlags.RemoteAuthCallbackPort,
-			Issuer:       runFlags.RemoteAuthFlags.RemoteAuthIssuer,
-			AuthorizeURL: runFlags.RemoteAuthFlags.RemoteAuthAuthorizeURL,
-			TokenURL:     runFlags.RemoteAuthFlags.RemoteAuthTokenURL,
-			OAuthParams:  runFlags.OAuthParams,
-		}
+	return &runner.RemoteAuthConfig{
+		ClientID:     runFlags.RemoteAuthFlags.RemoteAuthClientID,
+		ClientSecret: runFlags.RemoteAuthFlags.RemoteAuthClientSecret,
+		Scopes:       runFlags.RemoteAuthFlags.RemoteAuthScopes,
+		SkipBrowser:  runFlags.RemoteAuthFlags.RemoteAuthSkipBrowser,
+		Timeout:      runFlags.RemoteAuthFlags.RemoteAuthTimeout,
+		CallbackPort: runFlags.RemoteAuthFlags.RemoteAuthCallbackPort,
+		Issuer:       runFlags.RemoteAuthFlags.RemoteAuthIssuer,
+		AuthorizeURL: runFlags.RemoteAuthFlags.RemoteAuthAuthorizeURL,
+		TokenURL:     runFlags.RemoteAuthFlags.RemoteAuthTokenURL,
+		OAuthParams:  runFlags.OAuthParams,
 	}
-	return nil
 }
 
 // getOidcFromFlags extracts OIDC configuration from command flags
@@ -587,7 +593,7 @@ func createOIDCConfig(oidcIssuer, oidcAudience, oidcJwksURL, oidcIntrospectionUR
 
 // createTelemetryConfig creates a telemetry configuration if any telemetry parameters are provided
 func createTelemetryConfig(otelEndpoint string, otelEnablePrometheusMetricsPath bool,
-	otelServiceName string, otelSamplingRate float64, otelHeaders []string,
+	otelServiceName string, otelTracingEnabled bool, otelMetricsEnabled bool, otelSamplingRate float64, otelHeaders []string,
 	otelInsecure bool, otelEnvironmentVariables []string) *telemetry.Config {
 	if otelEndpoint == "" && !otelEnablePrometheusMetricsPath {
 		return nil
@@ -625,6 +631,8 @@ func createTelemetryConfig(otelEndpoint string, otelEnablePrometheusMetricsPath 
 		Endpoint:                    otelEndpoint,
 		ServiceName:                 serviceName,
 		ServiceVersion:              telemetry.DefaultConfig().ServiceVersion,
+		TracingEnabled:              otelTracingEnabled,
+		MetricsEnabled:              otelMetricsEnabled,
 		SamplingRate:                otelSamplingRate,
 		Headers:                     headers,
 		Insecure:                    otelInsecure,

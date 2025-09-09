@@ -24,6 +24,7 @@ import (
 	"github.com/stacklok/toolhive/pkg/state"
 	"github.com/stacklok/toolhive/pkg/telemetry"
 	"github.com/stacklok/toolhive/pkg/transport/types"
+	workloadtypes "github.com/stacklok/toolhive/pkg/workloads/types"
 )
 
 // CurrentSchemaVersion is the current version of the RunConfig schema
@@ -122,6 +123,9 @@ type RunConfig struct {
 	// Deployer is the container runtime to use (not serialized)
 	Deployer rt.Deployer `json:"-" yaml:"-"`
 
+	// buildContext indicates whether this config is being built for CLI or operator use (not serialized)
+	buildContext BuildContext
+
 	// IsolateNetwork indicates whether to isolate the network for the container
 	IsolateNetwork bool `json:"isolate_network,omitempty" yaml:"isolate_network,omitempty"`
 
@@ -140,13 +144,8 @@ type RunConfig struct {
 	// ToolsFilter is the list of tools to filter
 	ToolsFilter []string `json:"tools_filter,omitempty" yaml:"tools_filter,omitempty"`
 
-	// ToolOverride is the map of tool names to override. Tools to override are
-	// specified as ToolOverride structs.
-	ToolOverride map[string]ToolOverride `json:"tool_override,omitempty" yaml:"tool_override,omitempty"`
-
-	// ToolOverrideFile is the path to a file containing tool overrides.
-	// The file is a JSON struct mapping actual names to ToolOverride structs.
-	ToolOverrideFile string `json:"tool_override_file,omitempty" yaml:"tool_override_file,omitempty"`
+	// ToolsOverride is a map from an actual tool to its overridden name and/or description
+	ToolsOverride map[string]ToolOverride `json:"tools_override,omitempty" yaml:"tools_override,omitempty"`
 
 	// IgnoreConfig contains configuration for ignore processing
 	IgnoreConfig *ignore.Config `json:"ignore_config,omitempty" yaml:"ignore_config,omitempty"`
@@ -239,6 +238,14 @@ func (c *RunConfig) WithTransport(t string) (*RunConfig, error) {
 
 // WithPorts configures the host and target ports
 func (c *RunConfig) WithPorts(proxyPort, targetPort int) (*RunConfig, error) {
+	// Skip port validation for operator context - ports will be used in containers, not on operator host
+	if c.buildContext == BuildContextOperator {
+		c.Port = proxyPort
+		c.TargetPort = targetPort
+		return c, nil
+	}
+
+	// CLI context: perform port validation as before
 	var selectedPort int
 	var err error
 
@@ -364,19 +371,28 @@ func (c *RunConfig) WithEnvFile(filePath string) (*RunConfig, error) {
 }
 
 // WithContainerName generates container name if not already set
-func (c *RunConfig) WithContainerName() *RunConfig {
+// Returns the config and a boolean indicating if the name was sanitized
+func (c *RunConfig) WithContainerName() (*RunConfig, bool) {
+	var wasModified bool
+
 	if c.ContainerName == "" {
 		if c.Image != "" {
 			// For container-based servers
-			containerName, baseName := container.GetOrGenerateContainerName(c.Name, c.Image)
+			// Sanitize the name if provided to ensure it's safe for file paths
+			safeName := ""
+			if c.Name != "" {
+				safeName, wasModified = workloadtypes.SanitizeWorkloadName(c.Name)
+			}
+			containerName, baseName := container.GetOrGenerateContainerName(safeName, c.Image)
 			c.ContainerName = containerName
 			c.BaseName = baseName
 		} else if c.RemoteURL != "" && c.Name != "" {
-			// For remote servers, use the provided name as base name
-			c.BaseName = c.Name
+			// For remote servers, sanitize the provided name to ensure it's safe for file paths
+			c.BaseName, wasModified = workloadtypes.SanitizeWorkloadName(c.Name)
+			c.ContainerName = c.Name
 		}
 	}
-	return c
+	return c, wasModified
 }
 
 // WithStandardLabels adds standard labels to the container
@@ -416,7 +432,6 @@ func LoadState(ctx context.Context, name string) (*RunConfig, error) {
 
 // RemoteAuthConfig holds configuration for remote authentication
 type RemoteAuthConfig struct {
-	EnableRemoteAuth bool
 	ClientID         string
 	ClientSecret     string
 	ClientSecretFile string

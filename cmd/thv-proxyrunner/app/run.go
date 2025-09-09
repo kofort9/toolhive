@@ -69,10 +69,15 @@ var (
 	oidcClientSecret     string
 
 	// OpenTelemetry flags
-	runOtelServiceName                 string
-	runOtelHeaders                     []string
-	runOtelInsecure                    bool
-	runOtelEnablePrometheusMetricsPath bool
+	runOtelEnabled              bool
+	runOtelEndpoint             string
+	runOtelServiceName          string
+	runOtelHeaders              []string
+	runOtelTracingEnabled       bool
+	runOtelMetricsEnabled       bool
+	runOtelInsecure             bool
+	runOtelTracingSamplingRate  float64
+	enablePrometheusMetricsPath bool
 
 	// Network isolation flag
 	runIsolateNetwork bool
@@ -176,13 +181,23 @@ func init() {
 	)
 
 	// Add OpenTelemetry flags
+	runCmd.Flags().BoolVar(&runOtelEnabled, "otel-enabled", false,
+		"Enable OpenTelemetry")
+	runCmd.Flags().StringVar(&runOtelEndpoint, "otel-endpoint", "",
+		"OpenTelemetry endpoint URL (defaults to http://localhost:4318)")
 	runCmd.Flags().StringVar(&runOtelServiceName, "otel-service-name", "",
 		"OpenTelemetry service name (defaults to toolhive-mcp-proxy)")
 	runCmd.Flags().StringArrayVar(&runOtelHeaders, "otel-headers", nil,
 		"OpenTelemetry OTLP headers in key=value format (e.g., x-honeycomb-team=your-api-key)")
 	runCmd.Flags().BoolVar(&runOtelInsecure, "otel-insecure", false,
 		"Connect to the OpenTelemetry endpoint using HTTP instead of HTTPS")
-	runCmd.Flags().BoolVar(&runOtelEnablePrometheusMetricsPath, "otel-enable-prometheus-metrics-path", false,
+	runCmd.Flags().BoolVar(&runOtelTracingEnabled, "otel-tracing-enabled", false,
+		"Enable distributed tracing (when OTLP endpoint is configured)")
+	runCmd.Flags().BoolVar(&runOtelMetricsEnabled, "otel-metrics-enabled", false,
+		"Enable OTLP metrics export (when OTLP endpoint is configured)")
+	runCmd.Flags().Float64Var(&runOtelTracingSamplingRate, "otel-tracing-sampling-rate", 0.0,
+		"OpenTelemetry trace sampling rate (0.0-1.0)")
+	runCmd.Flags().BoolVar(&enablePrometheusMetricsPath, "enable-prometheus-metrics-path", false,
 		"Enable Prometheus-style /metrics endpoint on the main transport port")
 	runCmd.Flags().BoolVar(&runIsolateNetwork, "isolate-network", false,
 		"Isolate the container network from the host (default: false)")
@@ -229,9 +244,7 @@ func runCmdFunc(cmd *cobra.Command, args []string) error {
 	// Get debug mode flag
 	debugMode, _ := cmd.Flags().GetBool("debug")
 
-	// we set the below to empty values because they currently aren't used in kubernetes.
-	// we will remove the below completely when we have a kubernetes runner that doesn't require these values.
-	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables := "", 0.0, []string{}
+	finalOtelEnvironmentVariables := []string{}
 
 	// Create container runtime
 	rt, err := container.NewFactory().Create(ctx)
@@ -274,8 +287,9 @@ func runCmdFunc(cmd *cobra.Command, args []string) error {
 		WithAuditEnabled(runEnableAudit, runAuditConfig).
 		WithOIDCConfig(oidcIssuer, oidcAudience, oidcJwksURL, oidcIntrospectionURL, oidcClientID, oidcClientSecret,
 			runThvCABundle, runJWKSAuthTokenFile, runResourceURL, runJWKSAllowPrivateIP).
-		WithTelemetryConfig(finalOtelEndpoint, runOtelEnablePrometheusMetricsPath, runOtelServiceName,
-			finalOtelSamplingRate, runOtelHeaders, runOtelInsecure, finalOtelEnvironmentVariables).
+		WithTelemetryConfig(runOtelEndpoint, enablePrometheusMetricsPath, runOtelTracingEnabled,
+			runOtelMetricsEnabled, runOtelServiceName, runOtelTracingSamplingRate,
+			runOtelHeaders, runOtelInsecure, finalOtelEnvironmentVariables).
 		WithToolsFilter(runToolsFilter)
 
 	// Process environment files

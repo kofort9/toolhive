@@ -30,7 +30,12 @@ var (
 	ErrBadProtocolScheme = errors.New("invalid protocol scheme provided for MCP server")
 	// ErrImageNotFound is returned when the specified image is not found in the registry.
 	ErrImageNotFound = errors.New("image not found in registry, please check the image name or tag")
+	// ErrInvalidRunConfig is returned when the run configuration built by RunConfigBuilder is invalid
+	ErrInvalidRunConfig = errors.New("invalid run configuration provided")
 )
+
+// Retriever is a function that retrieves the MCP server definition from the registry.
+type Retriever func(context.Context, string, string, string) (string, registry.ServerMetadata, error)
 
 // GetMCPServer retrieves the MCP server definition from the registry.
 func GetMCPServer(
@@ -162,7 +167,8 @@ func resolveCACertPath(flagValue string) string {
 	}
 
 	// Otherwise, check configuration
-	cfg := config.GetConfig()
+	configProvider := config.NewDefaultProvider()
+	cfg := configProvider.GetConfig()
 	if cfg.CACertificatePath != "" {
 		logger.Debugf("Using configured CA certificate: %s", cfg.CACertificatePath)
 		return cfg.CACertificatePath
