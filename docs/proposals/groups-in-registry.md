@@ -17,14 +17,20 @@ Extend the current registry format to include a top-level `groups` array alongsi
 ```json
 {
   "servers": [
-    /* existing MCP server entries packaged as (server.json + extensions) */
+    /* existing MCP server entries */
   ],
+  "remote_servers": {
+    /* existing remote server entries */
+  },
   "groups": [
     {
       "name": "Mobile App Team Toolkit",
       "description": "MCP servers for the mobile app development team's workflows",
       "servers": [
         /* server entries following same format as top-level servers */
+      ],
+      "remote_servers": [
+        /* remote server entries following same format as top-level remote_servers */
       ]
     }
   ]
@@ -36,6 +42,114 @@ Extend the current registry format to include a top-level `groups` array alongsi
 - `name`: Human-readable group identifier
 - `description`: Descriptive text for discoverability (unused otherwise)
 - `servers`: Array of server metadata following the same format as top-level servers
+- `remote_servers`: Array of remote server metadata following the same format as top-level remote_servers
+
+### Example
+
+```json
+{
+  "servers": {
+    /* existing MCP server entries */
+  },
+  "remote_servers": {
+    /* existing remote server entries */
+  },
+  "groups": [
+    {
+      "name": "mobile-app-team-toolkit",
+      "description": "MCP servers for the mobile app development team's workflows",
+      "servers": {
+        "fetch": {
+          "description": "Allows you to fetch content from the web",
+          "tier": "Community",
+          "status": "Active",
+          "transport": "streamable-http",
+          "tools": [
+            "fetch"
+          ],
+          "metadata": {
+            "stars": 17,
+            "pulls": 12390,
+            "last_updated": "2025-09-05T02:29:06Z"
+          },
+          "repository_url": "https://github.com/stackloklabs/gofetch",
+          "image": "ghcr.io/stackloklabs/gofetch/server:0.0.6",
+          "permissions": {
+            "network": {
+              "outbound": {
+                "insecure_allow_all": true,
+                "allow_port": [
+                  443
+                ]
+              }
+            }
+          },
+          "provenance": {
+            "sigstore_url": "tuf-repo-cdn.sigstore.dev",
+            "repository_uri": "https://github.com/StacklokLabs/gofetch",
+            "signer_identity": "/.github/workflows/release.yml",
+            "runner_environment": "github-hosted",
+            "cert_issuer": "https://token.actions.githubusercontent.com"
+          }
+        },
+        "internal-company-server": {
+          "description": "Allows you to view and manage proprietary resources",
+          "tier": "Community",
+          "status": "Active",
+          "transport": "streamable-http",
+          "tools": [
+            "get_internal_data"
+          ],
+          "repository_url": "https://github.com/internal/internal",
+          "image": "ghcr.io/internal/internal/server:0.0.6",
+          "provenance": {
+            "sigstore_url": "tuf-repo-cdn.sigstore.dev",
+            "repository_uri": "https://github.com/internal/internal",
+            "signer_identity": "/.github/workflows/release.yml",
+            "runner_environment": "github-hosted",
+            "cert_issuer": "https://token.actions.githubusercontent.com"
+          },
+          "env_vars": [
+            {
+              "name": "TEAM_ID",
+              "description": "Internal team identifier",
+              "required": true,
+              "default": "mobile-app-team"
+            },
+            {
+              "name": "USER_ID",
+              "description": "Internal user identifier",
+              "required": true,
+              "secret": true
+            }
+          ]
+        }
+      },
+      "remote_servers": {
+        "huggingface": {
+          "description": "Official Hugging Face MCP server for models, datasets, and research papers",
+          "tier": "Official",
+          "status": "Active",
+          "transport": "streamable-http",
+          "tools": [
+            "hf_whoami",
+            "space_search",
+            "model_search",
+            "model_details",
+            "paper_search",
+            "dataset_search",
+            "dataset_details",
+            "hf_doc_search",
+            "hf_doc_fetch",
+            "gr1_flux1_schnell_infer"
+          ],
+          "url": "https://huggingface.co/mcp"
+        }
+      }
+    }
+  ]
+}
+```
 
 ## Implementation Notes
 
@@ -64,4 +178,21 @@ thv group run mobile-app-team-toolkit --secret k8s_token,target=k8s.TOKEN --secr
 SMEs at companies will create specific groups for teams working on particular products or projects.
 
 ## Out of Scope / Future Considerations
-- Referencing servers within groups by name. In this proposal, all servers must be fully defined within the group. This avoids the complexity around referencing servers across registries, handling invalid references and override logic.
+
+- Referencing servers within groups by name. In this proposal, all servers must be fully defined within the group. This
+  avoids the complexity around referencing servers across registries, handling invalid references and override logic.
+
+## Alternatives Considered
+
+### Reusing `thv run`
+
+We considered reusing the existing `thv run` command with a group flag to specify a group from the registry. This would
+align with the current `--group` flag that exists on `thv stop` and `thv restart`.
+
+However, there is already a `--group` flag on `thv run` that specifies which group to assign to the created server.
+Furthermore, flags such as `--secret` and `--env` would need to support a different structure when the group is used,
+since they would need to specify which target server within the group they apply to.
+For example:
+`thv run --from-group dev --secret fetch_token,target=fetch.TOKEN`
+compared to
+`thv run fetch --secret fetch_token,target=TOKEN`

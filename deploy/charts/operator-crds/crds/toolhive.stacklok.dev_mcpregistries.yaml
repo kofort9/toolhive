@@ -222,9 +222,13 @@ spec:
               deployedServerCount:
                 description: DeployedServerCount is the number of deployed servers
                   with matching labels
-                format: int32
                 minimum: 0
                 type: integer
+              lastManualSyncTrigger:
+                description: |-
+                  LastManualSyncTrigger tracks the last processed manual sync annotation value
+                  Used to detect new manual sync requests via toolhive.stacklok.dev/sync-trigger annotation
+                type: string
               lastSyncHash:
                 description: |-
                   LastSyncHash is the hash of the last successfully synced data
@@ -250,7 +254,6 @@ spec:
                 type: string
               serverCount:
                 description: ServerCount is the total number of servers in the registry
-                format: int32
                 minimum: 0
                 type: integer
               storageRef:
@@ -283,7 +286,6 @@ spec:
               syncAttempts:
                 description: SyncAttempts is the number of sync attempts since last
                   success
-                format: int32
                 minimum: 0
                 type: integer
             type: object

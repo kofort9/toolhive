@@ -159,41 +159,52 @@ func TestExtractParameter(t *testing.T) {
 	}
 }
 
-func TestDeriveIssuerFromURL(t *testing.T) {
+func TestDeriveIssuerFromRealm(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name     string
-		url      string
+		realm    string
 		expected string
 	}{
 		{
-			name:     "https url",
-			url:      "https://example.com/api",
+			name:     "valid https issuer url",
+			realm:    "https://example.com",
 			expected: "https://example.com",
 		},
 		{
-			name:     "http url",
-			url:      "http://localhost:8080/api",
-			expected: "https://localhost",
+			name:     "https url with path",
+			realm:    "https://api.example.com/v1",
+			expected: "https://api.example.com/v1",
 		},
 		{
-			name:     "url with path",
-			url:      "https://api.example.com/v1/endpoint",
-			expected: "https://api.example.com",
-		},
-		{
-			name:     "url with query params",
-			url:      "https://example.com/api?param=value",
+			name:     "https url with query params (should be removed)",
+			realm:    "https://example.com?param=value",
 			expected: "https://example.com",
 		},
 		{
-			name:     "invalid url",
-			url:      "not-a-url",
+			name:     "https url with fragment (should be removed)",
+			realm:    "https://example.com#fragment",
+			expected: "https://example.com",
+		},
+		{
+			name:     "http url (not valid for issuer)",
+			realm:    "http://example.com",
 			expected: "",
 		},
 		{
-			name:     "empty url",
-			url:      "",
+			name:     "non-url realm string",
+			realm:    "MyRealm",
+			expected: "",
+		},
+		{
+			name:     "invalid url",
+			realm:    "not-a-url",
+			expected: "",
+		},
+		{
+			name:     "empty realm",
+			realm:    "",
 			expected: "",
 		},
 	}
@@ -201,14 +212,13 @@ func TestDeriveIssuerFromURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := DeriveIssuerFromURL(tt.url)
+			result := DeriveIssuerFromRealm(tt.realm)
 			if result != tt.expected {
-				t.Errorf("DeriveIssuerFromURL() = %v, want %v", result, tt.expected)
+				t.Errorf("DeriveIssuerFromRealm() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
 }
-
 func TestDetectAuthenticationFromServer(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -354,4 +364,61 @@ func TestOAuthFlowConfig(t *testing.T) {
 			t.Errorf("Expected Scopes to be set")
 		}
 	})
+}
+
+func TestDeriveIssuerFromURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "https no port",
+			in:   "https://api.example.com",
+			want: "https://api.example.com",
+		},
+		{
+			name: "https with nondefault port, path, query, fragment",
+			in:   "https://api.example.com:8443/v1/users?id=42#top",
+			want: "https://api.example.com:8443",
+		},
+		{
+			name: "http scheme forced to https",
+			in:   "http://api.example.com",
+			want: "https://api.example.com",
+		},
+		{
+			name: "userinfo ignored; keep host:port",
+			in:   "https://user:pass@auth.example.com:9443/oauth/authorize",
+			want: "https://auth.example.com:9443",
+		},
+		{
+			name: "file scheme unsupported -> empty",
+			in:   "file:///etc/passwd",
+			want: "",
+		},
+		{
+			name: "malformed url -> empty",
+			in:   "://not a url",
+			want: "",
+		},
+		{
+			name: "empty host -> empty",
+			in:   "https://",
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := DeriveIssuerFromURL(tc.in)
+			if got != tc.want {
+				t.Fatalf("DeriveIssuerFromURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
 }

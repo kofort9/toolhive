@@ -194,6 +194,9 @@ components:
             Port is the port on which the workload is exposed.
             This is embedded in the URL.
           type: integer
+        proxy_mode:
+          description: ProxyMode is the proxy mode for stdio transport (sse or streamable-http).
+          type: string
         remote:
           description: Remote indicates whether this is a remote workload (true) or
             a container workload (false).
@@ -325,6 +328,29 @@ components:
             Secret indicates whether this environment variable contains sensitive information
             If true, the value will be stored as a secret rather than as a plain environment variable
           type: boolean
+      type: object
+    registry.Group:
+      properties:
+        description:
+          description: Description is a human-readable description of the group's
+            purpose and functionality
+          type: string
+        name:
+          description: Name is the identifier for the group, used when referencing
+            the group in commands
+          type: string
+        remote_servers:
+          additionalProperties:
+            $ref: '#/components/schemas/registry.RemoteServerMetadata'
+          description: RemoteServers is a map of server names to their corresponding
+            remote server definitions within this group
+          type: object
+        servers:
+          additionalProperties:
+            $ref: '#/components/schemas/registry.ImageMetadata'
+          description: Servers is a map of server names to their corresponding server
+            definitions within this group
+          type: object
       type: object
     registry.Header:
       properties:
@@ -527,6 +553,13 @@ components:
     registry.Registry:
       description: Full registry data
       properties:
+        groups:
+          description: Groups is a slice of group definitions containing related MCP
+            servers
+          items:
+            $ref: '#/components/schemas/registry.Group'
+          type: array
+          uniqueItems: false
         last_updated:
           description: LastUpdated is the timestamp when the registry was last updated,
             in RFC3339 format
@@ -701,6 +734,10 @@ components:
         debug:
           description: Debug indicates whether debug mode is enabled
           type: boolean
+        env_file_dir:
+          description: EnvFileDir is the directory path to load environment files
+            from
+          type: string
         env_vars:
           additionalProperties:
             type: string
@@ -1117,6 +1154,9 @@ components:
         proxy_mode:
           description: Proxy mode to use
           type: string
+        proxy_port:
+          description: Port for the HTTP proxy to listen on
+          type: integer
         secrets:
           description: Secret parameters to inject
           items:
@@ -1467,6 +1507,9 @@ components:
         proxy_mode:
           description: Proxy mode to use
           type: string
+        proxy_port:
+          description: Port for the HTTP proxy to listen on
+          type: integer
         secrets:
           description: Secret parameters to inject
           items:

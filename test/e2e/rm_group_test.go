@@ -10,7 +10,7 @@ import (
 	"github.com/stacklok/toolhive/test/e2e"
 )
 
-var _ = Describe("Group Remove E2E Tests", func() {
+var _ = Describe("Group Remove E2E Tests", Label("core", "groups", "e2e"), func() {
 	var (
 		config           *e2e.TestConfig
 		testGroupName    string
@@ -100,7 +100,7 @@ var _ = Describe("Group Remove E2E Tests", func() {
 		It("should require group flag when no workload name provided", func() {
 			_, stderr, err := e2e.NewTHVCommand(config, "rm").ExpectFailure()
 			Expect(err).To(HaveOccurred())
-			Expect(stderr).To(ContainSubstring("workload name is required when not using --group flag"))
+			Expect(stderr).To(ContainSubstring("at least one workload name must be provided"))
 		})
 	})
 })

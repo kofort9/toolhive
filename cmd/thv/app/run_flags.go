@@ -9,6 +9,7 @@ import (
 
 	"github.com/stacklok/toolhive/pkg/auth"
 	"github.com/stacklok/toolhive/pkg/authz"
+	"github.com/stacklok/toolhive/pkg/cli"
 	cfg "github.com/stacklok/toolhive/pkg/config"
 	"github.com/stacklok/toolhive/pkg/container"
 	"github.com/stacklok/toolhive/pkg/container/runtime"
@@ -89,6 +90,8 @@ type RunFlags struct {
 
 	// Tools filter
 	ToolsFilter []string
+	// Tools override file
+	ToolsOverride string
 
 	// Configuration import
 	FromConfig string
@@ -200,6 +203,12 @@ func AddRunFlags(cmd *cobra.Command, config *RunFlags) {
 		nil,
 		"Filter MCP server tools (comma-separated list of tool names)",
 	)
+	cmd.Flags().StringVar(
+		&config.ToolsOverride,
+		"tools-override",
+		"",
+		"Path to a JSON file containing overrides for MCP server tools names and descriptions",
+	)
 	cmd.Flags().StringVar(&config.FromConfig, "from-config", "", "Load configuration from exported file")
 
 	// Environment file processing flags
@@ -221,6 +230,7 @@ func BuildRunnerConfig(
 	cmdArgs []string,
 	debugMode bool,
 	cmd *cobra.Command,
+	groupName string,
 ) (*runner.RunConfig, error) {
 	// Validate and setup basic configuration
 	validatedHost, err := ValidateAndNormaliseHostFlag(runFlags.Host)
@@ -243,14 +253,13 @@ func BuildRunnerConfig(
 		return nil, err
 	}
 
-	// If --remote flag is provided, use it as the serverOrImage
 	if runFlags.RemoteURL != "" {
 		return buildRunnerConfig(ctx, runFlags, cmdArgs, debugMode, validatedHost, rt, runFlags.RemoteURL, nil,
 			nil, envVarValidator, oidcConfig, telemetryConfig)
 	}
 
 	// Handle image retrieval
-	imageURL, serverMetadata, err := handleImageRetrieval(ctx, serverOrImage, runFlags)
+	imageURL, serverMetadata, err := handleImageRetrieval(ctx, serverOrImage, runFlags, groupName)
 	if err != nil {
 		return nil, err
 	}
@@ -294,12 +303,14 @@ func setupOIDCConfiguration(cmd *cobra.Command, runFlags *RunFlags) (*auth.Token
 func setupTelemetryConfiguration(cmd *cobra.Command, runFlags *RunFlags) *telemetry.Config {
 	configProvider := cfg.NewDefaultProvider()
 	config := configProvider.GetConfig()
-	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables := getTelemetryFromFlags(cmd, config,
-		runFlags.OtelEndpoint, runFlags.OtelSamplingRate, runFlags.OtelEnvironmentVariables)
+	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables, finalOtelInsecure,
+		finalOtelEnablePrometheusMetricsPath := getTelemetryFromFlags(cmd, config, runFlags.OtelEndpoint,
+		runFlags.OtelSamplingRate, runFlags.OtelEnvironmentVariables, runFlags.OtelInsecure,
+		runFlags.OtelEnablePrometheusMetricsPath)
 
-	return createTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath,
+	return createTelemetryConfig(finalOtelEndpoint, finalOtelEnablePrometheusMetricsPath,
 		runFlags.OtelServiceName, runFlags.OtelTracingEnabled, runFlags.OtelMetricsEnabled, finalOtelSamplingRate,
-		runFlags.OtelHeaders, runFlags.OtelInsecure, finalOtelEnvironmentVariables)
+		runFlags.OtelHeaders, finalOtelInsecure, finalOtelEnvironmentVariables)
 }
 
 // setupRuntimeAndValidation creates container runtime and selects environment variable validator
@@ -325,6 +336,7 @@ func handleImageRetrieval(
 	ctx context.Context,
 	serverOrImage string,
 	runFlags *RunFlags,
+	groupName string,
 ) (
 	string,
 	registry.ServerMetadata,
@@ -333,7 +345,7 @@ func handleImageRetrieval(
 
 	// Try to get server from registry (container or remote) or direct URL
 	imageURL, serverMetadata, err := retriever.GetMCPServer(
-		ctx, serverOrImage, runFlags.CACertPath, runFlags.VerifyImage)
+		ctx, serverOrImage, runFlags.CACertPath, runFlags.VerifyImage, groupName)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to find or create the MCP server %s: %v", serverOrImage, err)
 	}
@@ -391,61 +403,74 @@ func buildRunnerConfig(
 	} else if serverMetadata != nil {
 		transportType = serverMetadata.GetTransport()
 	}
-	// Create a builder for the RunConfig
-	builder := runner.NewRunConfigBuilder().
-		WithRuntime(rt).
-		WithCmdArgs(cmdArgs).
-		WithName(runFlags.Name).
-		WithImage(imageURL).
-		WithRemoteURL(runFlags.RemoteURL).
-		WithHost(validatedHost).
-		WithTargetHost(runFlags.TargetHost).
-		WithDebug(debugMode).
-		WithVolumes(runFlags.Volumes).
-		WithSecrets(runFlags.Secrets).
-		WithAuthzConfigPath(runFlags.AuthzConfig).
-		WithAuditConfigPath(runFlags.AuditConfig).
-		WithPermissionProfileNameOrPath(runFlags.PermissionProfile).
-		WithNetworkIsolation(runFlags.IsolateNetwork).
-		WithK8sPodPatch(runFlags.K8sPodPatch).
-		WithProxyMode(types.ProxyMode(runFlags.ProxyMode)).
-		WithTransportAndPorts(transportType, runFlags.ProxyPort, runFlags.TargetPort).
-		WithAuditEnabled(runFlags.EnableAudit, runFlags.AuditConfig).
-		WithLabels(runFlags.Labels).
-		WithGroup(runFlags.Group).
-		WithIgnoreConfig(&ignore.Config{
+
+	// set default options
+	opts := []runner.RunConfigBuilderOption{
+		runner.WithRuntime(rt),
+		runner.WithCmdArgs(cmdArgs),
+		runner.WithName(runFlags.Name),
+		runner.WithImage(imageURL),
+		runner.WithRemoteURL(runFlags.RemoteURL),
+		runner.WithHost(validatedHost),
+		runner.WithTargetHost(runFlags.TargetHost),
+		runner.WithDebug(debugMode),
+		runner.WithVolumes(runFlags.Volumes),
+		runner.WithSecrets(runFlags.Secrets),
+		runner.WithAuthzConfigPath(runFlags.AuthzConfig),
+		runner.WithAuditConfigPath(runFlags.AuditConfig),
+		runner.WithPermissionProfileNameOrPath(runFlags.PermissionProfile),
+		runner.WithNetworkIsolation(runFlags.IsolateNetwork),
+		runner.WithK8sPodPatch(runFlags.K8sPodPatch),
+		runner.WithProxyMode(types.ProxyMode(runFlags.ProxyMode)),
+		runner.WithTransportAndPorts(transportType, runFlags.ProxyPort, runFlags.TargetPort),
+		runner.WithAuditEnabled(runFlags.EnableAudit, runFlags.AuditConfig),
+		runner.WithLabels(runFlags.Labels),
+		runner.WithGroup(runFlags.Group),
+		runner.WithIgnoreConfig(&ignore.Config{
 			LoadGlobal:    runFlags.IgnoreGlobally,
 			PrintOverlays: runFlags.PrintOverlays,
-		})
+		}),
+	}
 
+	var toolsOverride map[string]runner.ToolOverride
+	if runFlags.ToolsOverride != "" {
+		loadedToolsOverride, err := cli.LoadToolsOverride(runFlags.ToolsOverride)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load tools override: %v", err)
+		}
+		toolsOverride = *loadedToolsOverride
+	}
+
+	opts = append(opts, runner.WithToolsOverride(toolsOverride))
 	// Configure middleware from flags
-	builder = builder.WithMiddlewareFromFlags(
-		oidcConfig,
-		runFlags.ToolsFilter,
-		nil,
-		telemetryConfig,
-		runFlags.AuthzConfig,
-		runFlags.EnableAudit,
-		runFlags.AuditConfig,
-		runFlags.Name,
-		runFlags.Transport,
+	opts = append(
+		opts,
+		runner.WithMiddlewareFromFlags(
+			oidcConfig,
+			runFlags.ToolsFilter,
+			toolsOverride,
+			telemetryConfig,
+			runFlags.AuthzConfig,
+			runFlags.EnableAudit,
+			runFlags.AuditConfig,
+			runFlags.Name,
+			runFlags.Transport,
+		),
 	)
 
 	if remoteServerMetadata, ok := serverMetadata.(*registry.RemoteServerMetadata); ok {
-		if remoteAuthConfig := getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata); remoteAuthConfig != nil {
-			builder = builder.WithRemoteAuth(remoteAuthConfig)
-		}
+		remoteAuthConfig := getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata)
+		opts = append(opts, runner.WithRemoteAuth(remoteAuthConfig), runner.WithRemoteURL(remoteServerMetadata.URL))
 	}
 	if runFlags.RemoteURL != "" {
-		if remoteAuthConfig := getRemoteAuthFromRunFlags(runFlags); remoteAuthConfig != nil {
-			builder = builder.WithRemoteAuth(remoteAuthConfig)
-		}
+		remoteAuthConfig := getRemoteAuthFromRunFlags(runFlags)
+		opts = append(opts, runner.WithRemoteAuth(remoteAuthConfig))
 	}
 
 	// Load authz config if path is provided
 	if runFlags.AuthzConfig != "" {
 		if authzConfigData, err := authz.LoadConfig(runFlags.AuthzConfig); err == nil {
-			builder = builder.WithAuthzConfig(authzConfigData)
+			opts = append(opts, runner.WithAuthzConfig(authzConfigData))
 		}
 		// Note: Path is already set via WithAuthzConfigPath above
 	}
@@ -455,30 +480,30 @@ func buildRunnerConfig(
 	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables := extractTelemetryValues(telemetryConfig)
 
 	// Set additional configurations that are still needed in old format for other parts of the system
-	builder = builder.WithOIDCConfig(oidcIssuer, oidcAudience, oidcJwksURL, oidcIntrospectionURL, oidcClientID, oidcClientSecret,
-		runFlags.ThvCABundle, runFlags.JWKSAuthTokenFile, runFlags.ResourceURL, runFlags.JWKSAllowPrivateIP).
-		WithTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath,
+	opts = append(opts,
+		runner.WithOIDCConfig(oidcIssuer, oidcAudience, oidcJwksURL, oidcIntrospectionURL, oidcClientID, oidcClientSecret,
+			runFlags.ThvCABundle, runFlags.JWKSAuthTokenFile, runFlags.ResourceURL, runFlags.JWKSAllowPrivateIP,
+		),
+		runner.WithTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath,
 			runFlags.OtelTracingEnabled, runFlags.OtelMetricsEnabled, runFlags.OtelServiceName,
-			finalOtelSamplingRate, runFlags.OtelHeaders, runFlags.OtelInsecure, finalOtelEnvironmentVariables).
-		WithToolsFilter(runFlags.ToolsFilter)
+			finalOtelSamplingRate, runFlags.OtelHeaders, runFlags.OtelInsecure, finalOtelEnvironmentVariables,
+		),
+		runner.WithToolsFilter(runFlags.ToolsFilter))
 
 	imageMetadata, _ := serverMetadata.(*registry.ImageMetadata)
 	// Process environment files
 	var err error
 	if runFlags.EnvFile != "" {
-		builder, err = builder.WithEnvFile(runFlags.EnvFile)
+		opts = append(opts, runner.WithEnvFile(runFlags.EnvFile))
 		if err != nil {
 			return nil, fmt.Errorf("failed to process env file %s: %v", runFlags.EnvFile, err)
 		}
 	}
 	if runFlags.EnvFileDir != "" {
-		builder, err = builder.WithEnvFilesFromDirectory(runFlags.EnvFileDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to process env files from directory %s: %v", runFlags.EnvFileDir, err)
-		}
+		opts = append(opts, runner.WithEnvFilesFromDirectory(runFlags.EnvFileDir))
 	}
 
-	return builder.Build(ctx, imageMetadata, envVars, envVarValidator)
+	return runner.NewRunConfigBuilder(ctx, imageMetadata, envVars, envVarValidator, opts...)
 }
 
 // extractOIDCValues extracts OIDC values from the OIDC config for legacy configuration
@@ -504,6 +529,9 @@ func getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata *registry.Remote
 	}
 
 	if remoteServerMetadata.OAuthConfig != nil {
+		if remoteServerMetadata.OAuthConfig.CallbackPort == 0 {
+			remoteServerMetadata.OAuthConfig.CallbackPort = runner.DefaultCallbackPort
+		}
 		return &runner.RemoteAuthConfig{
 			ClientID:     runFlags.RemoteAuthFlags.RemoteAuthClientID,
 			ClientSecret: runFlags.RemoteAuthFlags.RemoteAuthClientSecret,
@@ -552,7 +580,8 @@ func getOidcFromFlags(cmd *cobra.Command) (string, string, string, string, strin
 
 // getTelemetryFromFlags extracts telemetry configuration from command flags
 func getTelemetryFromFlags(cmd *cobra.Command, config *cfg.Config, otelEndpoint string, otelSamplingRate float64,
-	otelEnvironmentVariables []string) (string, float64, []string) {
+	otelEnvironmentVariables []string, otelInsecure bool, otelEnablePrometheusMetricsPath bool) (
+	string, float64, []string, bool, bool) {
 	// Use config values as fallbacks for OTEL flags if not explicitly set
 	finalOtelEndpoint := otelEndpoint
 	if !cmd.Flags().Changed("otel-endpoint") && config.OTEL.Endpoint != "" {
@@ -569,7 +598,18 @@ func getTelemetryFromFlags(cmd *cobra.Command, config *cfg.Config, otelEndpoint 
 		finalOtelEnvironmentVariables = config.OTEL.EnvVars
 	}
 
-	return finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables
+	finalOtelInsecure := otelInsecure
+	if !cmd.Flags().Changed("otel-insecure") {
+		finalOtelInsecure = config.OTEL.Insecure
+	}
+
+	finalOtelEnablePrometheusMetricsPath := otelEnablePrometheusMetricsPath
+	if !cmd.Flags().Changed("otel-enable-prometheus-metrics-path") {
+		finalOtelEnablePrometheusMetricsPath = config.OTEL.EnablePrometheusMetricsPath
+	}
+
+	return finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables,
+		finalOtelInsecure, finalOtelEnablePrometheusMetricsPath
 }
 
 // createOIDCConfig creates an OIDC configuration if any OIDC parameters are provided

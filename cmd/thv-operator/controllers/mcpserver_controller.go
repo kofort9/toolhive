@@ -71,12 +71,31 @@ var defaultRBACRules = []rbacv1.PolicyRule{
 		Resources: []string{"pods/attach"},
 		Verbs:     []string{"create", "get"},
 	},
+	{
+		APIGroups: []string{""},
+		Resources: []string{"configmaps"},
+		Verbs:     []string{"get", "list", "watch"},
+	},
 }
-
-var ctxLogger = log.FromContext(context.Background())
 
 // mcpContainerName is the name of the mcp container used in pod templates
 const mcpContainerName = "mcp"
+
+// trueValue is the string value "true" used for environment variable comparisons
+const trueValue = "true"
+
+// Restart annotation keys for triggering pod restart
+const (
+	RestartedAtAnnotationKey          = "mcpserver.toolhive.stacklok.dev/restarted-at"
+	RestartStrategyAnnotationKey      = "mcpserver.toolhive.stacklok.dev/restart-strategy"
+	LastProcessedRestartAnnotationKey = "mcpserver.toolhive.stacklok.dev/last-processed-restart"
+)
+
+// Restart strategy constants
+const (
+	RestartStrategyRolling   = "rolling"
+	RestartStrategyImmediate = "immediate"
+)
 
 // Authorization ConfigMap label constants
 const (
@@ -119,6 +138,7 @@ func (r *MCPServerReconciler) detectPlatform(ctx context.Context) (kubernetes.Pl
 // +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcptoolconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=create;delete;get;list;patch;update;watch;apply
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=create;delete;get;list;patch;update;watch
@@ -137,7 +157,7 @@ func (r *MCPServerReconciler) detectPlatform(ctx context.Context) (kubernetes.Pl
 //
 //nolint:gocyclo
 func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	ctxLogger = log.FromContext(ctx)
+	ctxLogger := log.FromContext(ctx)
 
 	// Fetch the MCPServer instance
 	mcpServer := &mcpv1alpha1.MCPServer{}
@@ -151,6 +171,26 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		// Error reading the object - requeue the request.
 		ctxLogger.Error(err, "Failed to get MCPServer")
+		return ctrl.Result{}, err
+	}
+
+	// Check if the restart annotation has been updated and trigger a rolling restart if needed
+	if shouldTriggerRestart, err := r.handleRestartAnnotation(ctx, mcpServer); err != nil {
+		ctxLogger.Error(err, "Failed to handle restart annotation")
+		return ctrl.Result{}, err
+	} else if shouldTriggerRestart {
+		// Return and requeue to avoid double-processing after triggering restart
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Check if MCPToolConfig is referenced and handle it
+	if err := r.handleToolConfig(ctx, mcpServer); err != nil {
+		ctxLogger.Error(err, "Failed to handle MCPToolConfig")
+		// Update status to reflect the error
+		mcpServer.Status.Phase = mcpv1alpha1.MCPServerPhaseFailed
+		if statusErr := r.Status().Update(ctx, mcpServer); statusErr != nil {
+			ctxLogger.Error(statusErr, "Failed to update MCPServer status after MCPToolConfig error")
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -311,6 +351,148 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, nil
 }
 
+// handleRestartAnnotation checks if the restart annotation has been updated and triggers a restart if needed
+// Returns true if a restart was triggered and the reconciliation should be requeued
+func (r *MCPServerReconciler) handleRestartAnnotation(ctx context.Context, mcpServer *mcpv1alpha1.MCPServer) (bool, error) {
+	ctxLogger := log.FromContext(ctx)
+
+	// Get the current restarted-at annotation value from the CR
+	currentRestartedAt := ""
+	if mcpServer.Annotations != nil {
+		currentRestartedAt = mcpServer.Annotations[RestartedAtAnnotationKey]
+	}
+
+	// Skip if no restart annotation is present
+	if currentRestartedAt == "" {
+		return false, nil
+	}
+
+	// Parse the timestamp from the annotation
+	requestTime, err := time.Parse(time.RFC3339, currentRestartedAt)
+	if err != nil {
+		ctxLogger.Error(err, "Invalid timestamp format in restart annotation",
+			"annotation", RestartedAtAnnotationKey,
+			"value", currentRestartedAt)
+		return false, nil
+	}
+
+	// Check if we've already processed this restart request
+	lastProcessedRestart := ""
+	if mcpServer.Annotations != nil {
+		lastProcessedRestart = mcpServer.Annotations[LastProcessedRestartAnnotationKey]
+	}
+
+	if lastProcessedRestart != "" {
+		lastProcessedTime, err := time.Parse(time.RFC3339, lastProcessedRestart)
+		if err == nil && !requestTime.After(lastProcessedTime) {
+			// This request has already been processed
+			return false, nil
+		}
+	}
+
+	// Get restart strategy (default to rolling)
+	strategy := RestartStrategyRolling
+	if mcpServer.Annotations != nil {
+		if strategyValue, exists := mcpServer.Annotations[RestartStrategyAnnotationKey]; exists {
+			strategy = strategyValue
+		}
+	}
+
+	ctxLogger.Info("Processing restart request",
+		"annotation", RestartedAtAnnotationKey,
+		"timestamp", currentRestartedAt,
+		"strategy", strategy)
+
+	// Perform the restart based on strategy
+	err = r.performRestart(ctx, mcpServer, strategy)
+	if err != nil {
+		return false, fmt.Errorf("failed to perform restart: %w", err)
+	}
+
+	// Update the last processed restart timestamp in annotations
+	if mcpServer.Annotations == nil {
+		mcpServer.Annotations = make(map[string]string)
+	}
+	mcpServer.Annotations[LastProcessedRestartAnnotationKey] = currentRestartedAt
+	err = r.Update(ctx, mcpServer)
+	if err != nil {
+		return false, fmt.Errorf("failed to update MCPServer with last processed restart annotation: %w", err)
+	}
+
+	return true, nil
+}
+
+// performRestart executes the restart based on the specified strategy
+func (r *MCPServerReconciler) performRestart(ctx context.Context, mcpServer *mcpv1alpha1.MCPServer, strategy string) error {
+	switch strategy {
+	case RestartStrategyRolling:
+		return r.performRollingRestart(ctx, mcpServer)
+	case RestartStrategyImmediate:
+		return r.performImmediateRestart(ctx, mcpServer)
+	default:
+		ctxLogger := log.FromContext(ctx)
+		ctxLogger.Info("Unknown restart strategy, defaulting to rolling", "strategy", strategy)
+		return r.performRollingRestart(ctx, mcpServer)
+	}
+}
+
+// performRollingRestart triggers a rolling restart by updating the deployment's pod template annotation
+func (r *MCPServerReconciler) performRollingRestart(ctx context.Context, mcpServer *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
+	deployment := &appsv1.Deployment{}
+	err := r.Get(ctx, types.NamespacedName{Name: mcpServer.Name, Namespace: mcpServer.Namespace}, deployment)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			ctxLogger.Info("Deployment not found, skipping rolling restart")
+			return nil
+		}
+		return fmt.Errorf("failed to get deployment for rolling restart: %w", err)
+	}
+
+	// Update the deployment's pod template annotation to trigger a rolling restart
+	if deployment.Spec.Template.Annotations == nil {
+		deployment.Spec.Template.Annotations = map[string]string{}
+	}
+	deployment.Spec.Template.Annotations[RestartedAtAnnotationKey] = time.Now().Format(time.RFC3339)
+
+	err = r.Update(ctx, deployment)
+	if err != nil {
+		return fmt.Errorf("failed to update deployment for rolling restart: %w", err)
+	}
+
+	ctxLogger.Info("Successfully triggered rolling restart of deployment", "deployment", deployment.Name)
+	return nil
+}
+
+// performImmediateRestart triggers an immediate restart by deleting the pods directly
+func (r *MCPServerReconciler) performImmediateRestart(ctx context.Context, mcpServer *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
+
+	// List pods belonging to this MCPServer
+	podList := &corev1.PodList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(mcpServer.Namespace),
+		client.MatchingLabels(labelsForMCPServer(mcpServer.Name)),
+	}
+
+	err := r.List(ctx, podList, listOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to list pods for immediate restart: %w", err)
+	}
+
+	// Delete each pod to trigger immediate restart
+	for _, pod := range podList.Items {
+		ctxLogger.Info("Deleting pod for immediate restart", "pod", pod.Name)
+		err = r.Delete(ctx, &pod)
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete pod %s for immediate restart: %w", pod.Name, err)
+		}
+	}
+
+	ctxLogger.Info("Successfully triggered immediate restart", "podsDeleted", len(podList.Items))
+	return nil
+}
+
 // ensureRBACResource is a generic helper function to ensure a Kubernetes resource exists and is up to date
 func (r *MCPServerReconciler) ensureRBACResource(
 	ctx context.Context,
@@ -338,6 +520,7 @@ func (r *MCPServerReconciler) createRBACResource(
 	resourceType string,
 	createResource func() client.Object,
 ) error {
+	ctxLogger := log.FromContext(ctx)
 	desired := createResource()
 	if err := controllerutil.SetControllerReference(mcpServer, desired, r.Scheme); err != nil {
 		logger.Errorf("Failed to set controller reference for %s: %v", resourceType, err)
@@ -364,6 +547,7 @@ func (r *MCPServerReconciler) updateRBACResourceIfNeeded(
 	createResource func() client.Object,
 	current client.Object,
 ) error {
+	ctxLogger := log.FromContext(ctx)
 	desired := createResource()
 	if err := controllerutil.SetControllerReference(mcpServer, desired, r.Scheme); err != nil {
 		logger.Errorf("Failed to set controller reference for %s: %v", resourceType, err)
@@ -385,6 +569,51 @@ func (r *MCPServerReconciler) updateRBACResourceIfNeeded(
 }
 
 // ensureRBACResources ensures that the RBAC resources are in place for the MCP server
+
+// handleToolConfig handles MCPToolConfig reference for an MCPServer
+func (r *MCPServerReconciler) handleToolConfig(ctx context.Context, m *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
+	if m.Spec.ToolConfigRef == nil {
+		// No MCPToolConfig referenced, clear any stored hash
+		if m.Status.ToolConfigHash != "" {
+			m.Status.ToolConfigHash = ""
+			if err := r.Status().Update(ctx, m); err != nil {
+				return fmt.Errorf("failed to clear MCPToolConfig hash from status: %w", err)
+			}
+		}
+		return nil
+	}
+
+	// Get the referenced MCPToolConfig
+	toolConfig, err := GetToolConfigForMCPServer(ctx, r.Client, m)
+	if err != nil {
+		return err
+	}
+
+	if toolConfig == nil {
+		return fmt.Errorf("MCPToolConfig %s not found", m.Spec.ToolConfigRef.Name)
+	}
+
+	// Check if the MCPToolConfig hash has changed
+	if m.Status.ToolConfigHash != toolConfig.Status.ConfigHash {
+		ctxLogger.Info("MCPToolConfig has changed, updating MCPServer",
+			"mcpserver", m.Name,
+			"toolconfig", toolConfig.Name,
+			"oldHash", m.Status.ToolConfigHash,
+			"newHash", toolConfig.Status.ConfigHash)
+
+		// Update the stored hash
+		m.Status.ToolConfigHash = toolConfig.Status.ConfigHash
+		if err := r.Status().Update(ctx, m); err != nil {
+			return fmt.Errorf("failed to update MCPToolConfig hash in status: %w", err)
+		}
+
+		// The change in hash will trigger a reconciliation of the RunConfig
+		// which will pick up the new tool configuration
+	}
+
+	return nil
+}
 func (r *MCPServerReconciler) ensureRBACResources(ctx context.Context, mcpServer *mcpv1alpha1.MCPServer) error {
 	proxyRunnerNameForRBAC := proxyRunnerServiceAccountName(mcpServer.Name)
 
@@ -444,7 +673,6 @@ func (r *MCPServerReconciler) ensureRBACResources(ctx context.Context, mcpServer
 	// otherwise, create a service account for the MCP server
 	mcpServerServiceAccountName := mcpServerServiceAccountName(mcpServer.Name)
 	return r.ensureRBACResource(ctx, mcpServer, "ServiceAccount", func() client.Object {
-		mcpServer.Spec.ServiceAccount = &mcpServerServiceAccountName
 		return &corev1.ServiceAccount{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      mcpServerServiceAccountName,
@@ -463,43 +691,81 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 
 	// Prepare container args
 	args := []string{"run", "--foreground=true"}
-	args = append(args, fmt.Sprintf("--proxy-port=%d", m.Spec.ProxyPort))
-	args = append(args, fmt.Sprintf("--name=%s", m.Name))
-	args = append(args, fmt.Sprintf("--transport=%s", m.Spec.Transport))
-	args = append(args, fmt.Sprintf("--host=%s", getProxyHost()))
 
-	if m.Spec.McpPort != 0 {
-		args = append(args, fmt.Sprintf("--target-port=%d", m.Spec.McpPort))
-	}
+	// Check if global ConfigMap mode is enabled via environment variable
+	useConfigMap := os.Getenv("TOOLHIVE_USE_CONFIGMAP") == trueValue
+	if useConfigMap {
+		// Use the operator-created ConfigMap (format: {name}-runconfig)
+		configMapName := fmt.Sprintf("%s-runconfig", m.Name)
+		configMapRef := fmt.Sprintf("%s/%s", m.Namespace, configMapName)
+		args = append(args, fmt.Sprintf("--from-configmap=%s", configMapRef))
 
-	// Generate pod template patch for secrets and merge with user-provided patch
-
-	finalPodTemplateSpec := NewMCPServerPodTemplateSpecBuilder(m.Spec.PodTemplateSpec).
-		WithServiceAccount(m.Spec.ServiceAccount).
-		WithSecrets(m.Spec.Secrets).
-		Build()
-	// Add pod template patch if we have one
-	if finalPodTemplateSpec != nil {
-		podTemplatePatch, err := json.Marshal(finalPodTemplateSpec)
-		if err != nil {
-			logger.Errorf("Failed to marshal pod template spec: %v", err)
-		} else {
-			args = append(args, fmt.Sprintf("--k8s-pod-patch=%s", string(podTemplatePatch)))
+		// Also add pod template patch for secrets (same as regular flags approach)
+		finalPodTemplateSpec := NewMCPServerPodTemplateSpecBuilder(m.Spec.PodTemplateSpec).
+			WithSecrets(m.Spec.Secrets).
+			Build()
+		// Add pod template patch if we have one
+		if finalPodTemplateSpec != nil {
+			podTemplatePatch, err := json.Marshal(finalPodTemplateSpec)
+			if err != nil {
+				logger.Errorf("Failed to marshal pod template spec: %v", err)
+			} else {
+				args = append(args, fmt.Sprintf("--k8s-pod-patch=%s", string(podTemplatePatch)))
+			}
+		}
+	} else {
+		// Use individual configuration flags (existing behavior)
+		args = append(args, fmt.Sprintf("--proxy-port=%d", m.Spec.ProxyPort))
+		args = append(args, fmt.Sprintf("--name=%s", m.Name))
+		args = append(args, fmt.Sprintf("--transport=%s", m.Spec.Transport))
+		args = append(args, fmt.Sprintf("--host=%s", getProxyHost()))
+		if m.Spec.McpPort != 0 {
+			args = append(args, fmt.Sprintf("--target-port=%d", m.Spec.McpPort))
+		}
+		// Add proxy mode for stdio transport
+		if m.Spec.ProxyMode != "" {
+			args = append(args, fmt.Sprintf("--proxy-mode=%s", m.Spec.ProxyMode))
 		}
 	}
 
-	// Add permission profile args
-	if m.Spec.PermissionProfile != nil {
-		switch m.Spec.PermissionProfile.Type {
-		case mcpv1alpha1.PermissionProfileTypeBuiltin:
-			args = append(args, fmt.Sprintf("--permission-profile=%s", m.Spec.PermissionProfile.Name))
-		case mcpv1alpha1.PermissionProfileTypeConfigMap:
-			args = append(args, fmt.Sprintf("--permission-profile-path=/etc/toolhive/profiles/%s", m.Spec.PermissionProfile.Key))
+	// Add pod template patch and permission profile only if not using ConfigMap
+	// When using ConfigMap, these are included in the runconfig.json
+	if !useConfigMap {
+		// Generate pod template patch for secrets and merge with user-provided patch
+		// If service account is not specified, use the default MCP server service account
+		serviceAccount := m.Spec.ServiceAccount
+		if serviceAccount == nil {
+			defaultSA := mcpServerServiceAccountName(m.Name)
+			serviceAccount = &defaultSA
+		}
+		finalPodTemplateSpec := NewMCPServerPodTemplateSpecBuilder(m.Spec.PodTemplateSpec).
+			WithServiceAccount(serviceAccount).
+			WithSecrets(m.Spec.Secrets).
+			Build()
+		// Add pod template patch if we have one
+		if finalPodTemplateSpec != nil {
+			podTemplatePatch, err := json.Marshal(finalPodTemplateSpec)
+			if err != nil {
+				logger.Errorf("Failed to marshal pod template spec: %v", err)
+			} else {
+				args = append(args, fmt.Sprintf("--k8s-pod-patch=%s", string(podTemplatePatch)))
+			}
+		}
+
+		// Add permission profile args
+		if m.Spec.PermissionProfile != nil {
+			switch m.Spec.PermissionProfile.Type {
+			case mcpv1alpha1.PermissionProfileTypeBuiltin:
+				args = append(args, fmt.Sprintf("--permission-profile=%s", m.Spec.PermissionProfile.Name))
+			case mcpv1alpha1.PermissionProfileTypeConfigMap:
+				args = append(args, fmt.Sprintf("--permission-profile-path=/etc/toolhive/profiles/%s", m.Spec.PermissionProfile.Key))
+			}
 		}
 	}
 
-	// Add OIDC configuration args
-	if m.Spec.OIDCConfig != nil {
+	// Add OIDC configuration args only if not using ConfigMap
+	// When using ConfigMap, OIDC configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.OIDCConfig != nil {
 		// Create a context with timeout for OIDC configuration operations
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -515,30 +781,36 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		args = append(args, fmt.Sprintf("--resource-url=%s", resourceURL))
 	}
 
-	// Add authorization configuration args
-	if m.Spec.AuthzConfig != nil {
+	// Add authorization configuration args only if not using ConfigMap
+	// When using ConfigMap, authorization configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.AuthzConfig != nil {
 		authzArgs := r.generateAuthzArgs(m)
 		args = append(args, authzArgs...)
 	}
 
-	// Add audit configuration args
-	if m.Spec.Audit != nil && m.Spec.Audit.Enabled {
+	// Add audit configuration args only if not using ConfigMap
+	// When using ConfigMap, audit configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.Audit != nil && m.Spec.Audit.Enabled {
 		args = append(args, "--enable-audit")
 	}
 
-	// Add environment variables as --env flags for the MCP server
-	for _, e := range m.Spec.Env {
-		args = append(args, fmt.Sprintf("--env=%s=%s", e.Name, e.Value))
+	// Add environment variables and tools filter only if not using ConfigMap
+	if !useConfigMap {
+		// Add environment variables as --env flags for the MCP server
+		for _, e := range m.Spec.Env {
+			args = append(args, fmt.Sprintf("--env=%s=%s", e.Name, e.Value))
+		}
+
+		// Add tools filter args
+		if len(m.Spec.ToolsFilter) > 0 {
+			slices.Sort(m.Spec.ToolsFilter)
+			args = append(args, fmt.Sprintf("--tools=%s", strings.Join(m.Spec.ToolsFilter, ",")))
+		}
 	}
 
-	// Add tools filter args
-	if len(m.Spec.ToolsFilter) > 0 {
-		slices.Sort(m.Spec.ToolsFilter)
-		args = append(args, fmt.Sprintf("--tools=%s", strings.Join(m.Spec.ToolsFilter, ",")))
-	}
-
-	// Add OpenTelemetry configuration args
-	if m.Spec.Telemetry != nil {
+	// Add OpenTelemetry configuration args only if not using ConfigMap
+	// When using ConfigMap, telemetry configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.Telemetry != nil {
 		if m.Spec.Telemetry.OpenTelemetry != nil {
 			otelArgs := r.generateOpenTelemetryArgs(m)
 			args = append(args, otelArgs...)
@@ -550,11 +822,13 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		}
 	}
 
-	// Add the image
+	// Always add the image as it's required by proxy runner command signature
+	// When using ConfigMap, the image from ConfigMap takes precedence, but we still need
+	// to provide this as a positional argument to satisfy the command requirements
 	args = append(args, m.Spec.Image)
 
-	// Add additional args
-	if len(m.Spec.Args) > 0 {
+	// Add additional args only if not using ConfigMap
+	if !useConfigMap && len(m.Spec.Args) > 0 {
 		args = append(args, "--")
 		args = append(args, m.Spec.Args...)
 	}
@@ -675,7 +949,8 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 	}
 
 	// Check for Vault Agent Injection and add env-file-dir argument if needed
-	if hasVaultAgentInjection(deploymentTemplateAnnotations) {
+	// Only add the flag when not using ConfigMap mode (when using ConfigMap, this is handled via the runconfig.json)
+	if !useConfigMap && hasVaultAgentInjection(deploymentTemplateAnnotations) {
 		args = append(args, "--env-file-dir=/vault/secrets")
 	}
 
@@ -927,6 +1202,7 @@ func (r *MCPServerReconciler) updateMCPServerStatus(ctx context.Context, m *mcpv
 
 // finalizeMCPServer performs the finalizer logic for the MCPServer
 func (r *MCPServerReconciler) finalizeMCPServer(ctx context.Context, m *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
 	// Update the MCPServer status
 	m.Status.Phase = mcpv1alpha1.MCPServerPhaseTerminating
 	m.Status.Message = "MCP server is being terminated"
@@ -1101,8 +1377,14 @@ func (r *MCPServerReconciler) deploymentNeedsUpdate(deployment *appsv1.Deploymen
 		}
 
 		// Check if the pod template spec has changed (including secrets)
+		// If service account is not specified, use the default MCP server service account
+		serviceAccount := mcpServer.Spec.ServiceAccount
+		if serviceAccount == nil {
+			defaultSA := mcpServerServiceAccountName(mcpServer.Name)
+			serviceAccount = &defaultSA
+		}
 		expectedPodTemplateSpec := NewMCPServerPodTemplateSpecBuilder(mcpServer.Spec.PodTemplateSpec).
-			WithServiceAccount(mcpServer.Spec.ServiceAccount).
+			WithServiceAccount(serviceAccount).
 			WithSecrets(mcpServer.Spec.Secrets).
 			Build()
 
@@ -1318,9 +1600,9 @@ func (*MCPServerReconciler) generateAuthzVolumeConfig(m *mcpv1alpha1.MCPServer) 
 								if m.Spec.AuthzConfig.ConfigMap.Key != "" {
 									return m.Spec.AuthzConfig.ConfigMap.Key
 								}
-								return "authz.json"
+								return defaultAuthzKey
 							}(),
-							Path: "authz.json",
+							Path: defaultAuthzKey,
 						},
 					},
 				},
@@ -1349,8 +1631,8 @@ func (*MCPServerReconciler) generateAuthzVolumeConfig(m *mcpv1alpha1.MCPServer) 
 					},
 					Items: []corev1.KeyToPath{
 						{
-							Key:  "authz.json",
-							Path: "authz.json",
+							Key:  defaultAuthzKey,
+							Path: defaultAuthzKey,
 						},
 					},
 				},
@@ -1633,7 +1915,7 @@ func (*MCPServerReconciler) generateAuthzArgs(m *mcpv1alpha1.MCPServer) []string
 	}
 
 	// Both ConfigMap and inline configurations use the same mounted path
-	authzConfigPath := "/etc/toolhive/authz/authz.json"
+	authzConfigPath := fmt.Sprintf("/etc/toolhive/authz/%s", defaultAuthzKey)
 	args = append(args, fmt.Sprintf("--authz-config=%s", authzConfigPath))
 
 	return args
@@ -1734,6 +2016,7 @@ func (*MCPServerReconciler) generateOpenTelemetryEnvVars(m *mcpv1alpha1.MCPServe
 
 // ensureAuthzConfigMap ensures the authorization ConfigMap exists for inline configuration
 func (r *MCPServerReconciler) ensureAuthzConfigMap(ctx context.Context, m *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
 	// Only create ConfigMap for inline authorization configuration
 	if m.Spec.AuthzConfig == nil || m.Spec.AuthzConfig.Type != mcpv1alpha1.AuthzConfigTypeInline ||
 		m.Spec.AuthzConfig.Inline == nil {
@@ -1771,7 +2054,7 @@ func (r *MCPServerReconciler) ensureAuthzConfigMap(ctx context.Context, m *mcpv1
 			Labels:    labelsForInlineAuthzConfig(m.Name),
 		},
 		Data: map[string]string{
-			"authz.json": string(authzConfigJSON),
+			defaultAuthzKey: string(authzConfigJSON),
 		},
 	}
 

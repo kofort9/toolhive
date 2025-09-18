@@ -140,17 +140,17 @@ type MCPRegistryStatus struct {
 	// ServerCount is the total number of servers in the registry
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	ServerCount int32 `json:"serverCount,omitempty"`
+	ServerCount int `json:"serverCount,omitempty"`
 
 	// DeployedServerCount is the number of deployed servers with matching labels
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	DeployedServerCount int32 `json:"deployedServerCount,omitempty"`
+	DeployedServerCount int `json:"deployedServerCount,omitempty"`
 
 	// SyncAttempts is the number of sync attempts since last success
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	SyncAttempts int32 `json:"syncAttempts,omitempty"`
+	SyncAttempts int `json:"syncAttempts,omitempty"`
 
 	// APIEndpoint is the URL of the registry API service
 	// +optional
@@ -159,6 +159,11 @@ type MCPRegistryStatus struct {
 	// StorageRef is a reference to the internal storage location
 	// +optional
 	StorageRef *StorageReference `json:"storageRef,omitempty"`
+
+	// LastManualSyncTrigger tracks the last processed manual sync annotation value
+	// Used to detect new manual sync requests via toolhive.stacklok.dev/sync-trigger annotation
+	// +optional
+	LastManualSyncTrigger string `json:"lastManualSyncTrigger,omitempty"`
 
 	// Conditions represent the latest available observations of the MCPRegistry's state
 	// +optional

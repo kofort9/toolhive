@@ -205,6 +205,12 @@ func (f *fileStatusManager) ListWorkloads(ctx context.Context, listAll bool, lab
 	// TODO: Fetch the runconfig if present to populate additional fields like package, tool type, group etc.
 	// There's currently an import cycle between this package and the runconfig package
 
+	for _, fileWorkload := range fileWorkloads {
+		if fileWorkload.Remote { // Remote workloads are not managed by the container runtime
+			delete(fileWorkloads, fileWorkload.Name) // Skip remote workloads here, we add them in workload manager
+		}
+	}
+
 	// Create a map of runtime workloads by name for easy lookup
 	workloadMap := f.mergeRuntimeAndFileWorkloads(ctx, runtimeContainers, fileWorkloads)
 
@@ -389,7 +395,6 @@ func (*fileStatusManager) migratePIDFromFile(workloadName string, containerInfo 
 		logger.Debugf("failed to read PID file for workload %s (base name: %s): %v", workloadName, baseName, err)
 		return 0, false
 	}
-
 	logger.Debugf("found PID %d in PID file for workload %s, will update status file", pid, workloadName)
 
 	// TODO: reinstate this once we decide to completely get rid of PID files.
@@ -545,11 +550,6 @@ func (f *fileStatusManager) getWorkloadFromRuntime(ctx context.Context, workload
 		return core.Workload{}, fmt.Errorf("failed to get workload info from runtime: %w", err)
 	}
 
-	// Verify exact name match to prevent Docker prefix matching false positives
-	if info.Name != workloadName {
-		return core.Workload{}, rt.ErrWorkloadNotFound
-	}
-
 	return types.WorkloadFromContainerInfo(&info)
 }
 
@@ -573,8 +573,8 @@ func (f *fileStatusManager) getWorkloadsFromFiles() (map[string]core.Workload, e
 		// Extract workload name from filename (remove .json extension)
 		workloadName := strings.TrimSuffix(filepath.Base(file), ".json")
 
-		// Use proper file locking like GetWorkload does
-		err := f.withFileReadLock(ctx, workloadName, func(statusFilePath string) error {
+		// Use write lock since we may need to update the file for PID migration
+		err := f.withFileLock(ctx, workloadName, func(statusFilePath string) error {
 			// Check if file exists first
 			if _, err := os.Stat(statusFilePath); os.IsNotExist(err) {
 				logger.Debugf("status file for workload %s no longer exists, skipping", workloadName)
@@ -813,7 +813,12 @@ func (f *fileStatusManager) mergeRuntimeAndFileWorkloads(
 ) map[string]core.Workload {
 	runtimeWorkloadMap := make(map[string]rt.ContainerInfo)
 	for _, container := range runtimeContainers {
-		runtimeWorkloadMap[container.Name] = container
+		// Use base name from labels for matching, fall back to container name if not available
+		baseName := labels.GetContainerBaseName(container.Labels)
+		if baseName == "" {
+			baseName = container.Name // fallback for containers without base name label
+		}
+		runtimeWorkloadMap[baseName] = container
 	}
 
 	// Create result map to avoid duplicates and merge data
@@ -826,14 +831,19 @@ func (f *fileStatusManager) mergeRuntimeAndFileWorkloads(
 			logger.Warnf("failed to convert container info for workload %s: %v", container.Name, err)
 			continue
 		}
-		workloadMap[container.Name] = workload
+		// Use base name for consistency with file workloads
+		baseName := labels.GetContainerBaseName(container.Labels)
+		if baseName == "" {
+			baseName = container.Name // fallback for containers without base name label
+		}
+		workloadMap[baseName] = workload
 	}
 
 	// Then, merge with file workloads, validating running workloads
 	for name, fileWorkload := range fileWorkloads {
 
 		if fileWorkload.Remote { // Remote workloads are not managed by the container runtime
-			continue
+			continue // Skip remote workloads here, we add them in workload manager
 		}
 		if runtimeContainer, exists := runtimeWorkloadMap[name]; exists {
 			// Validate running workloads similar to GetWorkload
@@ -841,11 +851,15 @@ func (f *fileStatusManager) mergeRuntimeAndFileWorkloads(
 			if err != nil {
 				logger.Warnf("failed to validate workload %s in list: %v", name, err)
 				// Fall back to basic merge without validation
-				runtimeWorkload := workloadMap[name]
-				runtimeWorkload.Status = fileWorkload.Status
-				runtimeWorkload.StatusContext = fileWorkload.StatusContext
-				runtimeWorkload.CreatedAt = fileWorkload.CreatedAt
-				workloadMap[name] = runtimeWorkload
+				if runtimeWorkload, exists := workloadMap[name]; exists {
+					runtimeWorkload.Status = fileWorkload.Status
+					runtimeWorkload.StatusContext = fileWorkload.StatusContext
+					runtimeWorkload.CreatedAt = fileWorkload.CreatedAt
+					workloadMap[name] = runtimeWorkload
+				} else {
+					// Runtime workload not found, just use the file workload
+					workloadMap[name] = fileWorkload
+				}
 			} else {
 				workloadMap[name] = validatedWorkload
 			}

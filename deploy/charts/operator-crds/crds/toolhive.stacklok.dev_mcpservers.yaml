@@ -8704,6 +8704,15 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              proxyMode:
+                default: sse
+                description: |-
+                  ProxyMode is the proxy mode for stdio transport (sse or streamable-http)
+                  This setting is only used when Transport is "stdio"
+                enum:
+                - sse
+                - streamable-http
+                type: string
               resourceOverrides:
                 description: ResourceOverrides allows overriding annotations and labels
                   for resources created by the operator
@@ -8903,9 +8912,24 @@ spec:
                         type: boolean
                     type: object
                 type: object
+              toolConfigRef:
+                description: |-
+                  ToolConfigRef references a MCPToolConfig resource for tool filtering and renaming.
+                  The referenced MCPToolConfig must exist in the same namespace as this MCPServer.
+                  Cross-namespace references are not supported for security and isolation reasons.
+                  If specified, this takes precedence over the inline ToolsFilter field.
+                properties:
+                  name:
+                    description: Name is the name of the MCPToolConfig resource in
+                      the same namespace
+                    type: string
+                required:
+                - name
+                type: object
               tools:
-                description: ToolsFilter is the filter on tools applied to the MCP
-                  server
+                description: |-
+                  ToolsFilter is the filter on tools applied to the MCP server
+                  Deprecated: Use ToolConfigRef instead
                 items:
                   type: string
                 type: array
@@ -9019,6 +9043,10 @@ spec:
                 - Running
                 - Failed
                 - Terminating
+                type: string
+              toolConfigHash:
+                description: ToolConfigHash stores the hash of the referenced ToolConfig
+                  for change detection
                 type: string
               url:
                 description: URL is the URL where the MCP server can be accessed
