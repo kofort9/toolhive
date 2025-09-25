@@ -41,55 +41,74 @@ func newPlatformClient(socketPath string) (*http.Client, []client.Opt) {
 	return httpClient, opts
 }
 
+// runtimeConfig defines the configuration for a container runtime
+type runtimeConfig struct {
+	envVar      string
+	runtimeType runtime.Type
+	description string
+}
+
 // findPlatformContainerSocket finds a container socket path on Unix systems
 func findPlatformContainerSocket(rt runtime.Type) (string, runtime.Type, error) {
-	// First check for custom socket paths via environment variables
-	if customSocketPath := os.Getenv(PodmanSocketEnv); customSocketPath != "" {
-		logger.Debugf("Using Podman socket from env: %s", customSocketPath)
-		// validate the socket path
-		if _, err := os.Stat(customSocketPath); err != nil {
-			return "", runtime.TypePodman, fmt.Errorf("invalid Podman socket path: %w", err)
-		}
-		return customSocketPath, runtime.TypePodman, nil
+	// Define runtime configurations in priority order
+	runtimeConfigs := []runtimeConfig{
+		{PodmanSocketEnv, runtime.TypePodman, "Podman"},
+		{DockerSocketEnv, runtime.TypeDocker, "Docker"},
+		{ColimaSocketEnv, runtime.TypeDocker, "Colima"},
+		{SocktainerSocketEnv, runtime.TypeDocker, "Socktainer"},
 	}
 
-	if customSocketPath := os.Getenv(DockerSocketEnv); customSocketPath != "" {
-		logger.Debugf("Using Docker socket from env: %s", customSocketPath)
-		// validate the socket path
-		if _, err := os.Stat(customSocketPath); err != nil {
-			return "", runtime.TypeDocker, fmt.Errorf("invalid Docker socket path: %w", err)
+	// Check environment variables first
+	for _, config := range runtimeConfigs {
+		if socketPath, runtimeType, err := checkEnvSocket(config); socketPath != "" {
+			if err != nil {
+				// Return the error if we found a socket path but it's invalid
+				return "", runtimeType, err
+			}
+			return socketPath, runtimeType, nil
 		}
-		return customSocketPath, runtime.TypeDocker, nil
 	}
 
-	if customSocketPath := os.Getenv(ColimaSocketEnv); customSocketPath != "" {
-		logger.Debugf("Using Colima socket from env: %s", customSocketPath)
-		// validate the socket path
-		if _, err := os.Stat(customSocketPath); err != nil {
-			return "", runtime.TypeDocker, fmt.Errorf("invalid Colima socket path: %w", err)
-		}
-		return customSocketPath, runtime.TypeDocker, nil
+	// Fall back to runtime-specific detection
+	return findRuntimeSocket(rt)
+}
+
+// checkEnvSocket checks for a socket path from environment variables
+func checkEnvSocket(config runtimeConfig) (string, runtime.Type, error) {
+	socketPath := os.Getenv(config.envVar)
+	if socketPath == "" {
+		return "", config.runtimeType, nil // No error, just not found
 	}
 
-	if rt == runtime.TypePodman {
-		socketPath, err := findPodmanSocket()
-		if err == nil {
+	logger.Debugf("Using %s socket from env: %s", config.description, socketPath)
+	if _, err := os.Stat(socketPath); err != nil {
+		return socketPath, config.runtimeType, fmt.Errorf("invalid %s socket path: %w", config.description, err)
+	}
+
+	return socketPath, config.runtimeType, nil
+}
+
+// findRuntimeSocket attempts to find a socket for the specified runtime type
+func findRuntimeSocket(rt runtime.Type) (string, runtime.Type, error) {
+	switch rt {
+	case runtime.TypePodman:
+		if socketPath, err := findPodmanSocket(); err == nil {
 			return socketPath, runtime.TypePodman, nil
 		}
-	}
-
-	if rt == runtime.TypeDocker {
-		socketPath, err := findDockerSocket()
-		if err == nil {
+	case runtime.TypeDocker:
+		if socketPath, err := findDockerSocket(); err == nil {
 			return socketPath, runtime.TypeDocker, nil
 		}
-	}
-
-	if rt == runtime.TypeColima {
-		socketPath, err := findColimaSocket()
-		if err == nil {
+	case runtime.TypeColima:
+		if socketPath, err := findColimaSocket(); err == nil {
 			return socketPath, runtime.TypeColima, nil
 		}
+	case runtime.TypeSocktainer:
+		if socketPath, err := findSocktainerSocket(); err == nil {
+			return socketPath, runtime.TypeSocktainer, nil
+		}
+	case runtime.TypeKubernetes:
+		// Kubernetes doesn't use Unix sockets, so we can't find one
 	}
 
 	return "", "", ErrRuntimeNotFound
@@ -201,4 +220,22 @@ func findColimaSocket() (string, error) {
 	}
 
 	return "", fmt.Errorf("colima socket not found in standard locations")
+}
+
+// findSocktainerSocket attempts to locate a Socktainer socket
+func findSocktainerSocket() (string, error) {
+	// Check user-specific location for Socktainer
+	if home := os.Getenv("HOME"); home != "" {
+		userSocketPath := filepath.Join(home, SocktainerSocketPath)
+		_, err := os.Stat(userSocketPath)
+
+		if err == nil {
+			logger.Debugf("Found Socktainer socket at %s", userSocketPath)
+			return userSocketPath, nil
+		}
+
+		logger.Debugf("Failed to check Socktainer socket at %s: %v", userSocketPath, err)
+	}
+
+	return "", fmt.Errorf("socktainer socket not found in standard locations")
 }

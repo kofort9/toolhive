@@ -189,6 +189,8 @@ const (
 	TypeKubernetes Type = "kubernetes"
 	// TypeColima represents the Colima runtime
 	TypeColima Type = "colima"
+	// TypeSocktainer represents the Socktainer runtime
+	TypeSocktainer Type = "socktainer"
 )
 
 // MountType represents the type of mount
