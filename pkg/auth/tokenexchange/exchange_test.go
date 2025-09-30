@@ -64,7 +64,7 @@ func TestTokenSource_Token_Success(t *testing.T) {
 	defer server.Close()
 
 	// Create config with test server
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:     server.URL,
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
@@ -106,7 +106,7 @@ func TestTokenSource_Token_WithRefreshToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:     server.URL,
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
@@ -141,7 +141,7 @@ func TestTokenSource_Token_NoExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:     server.URL,
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
@@ -164,7 +164,7 @@ func TestTokenSource_Token_SubjectTokenProviderError(t *testing.T) {
 	t.Parallel()
 
 	providerErr := errors.New("failed to get token from provider")
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:     "https://example.com/token",
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
@@ -194,7 +194,7 @@ func TestTokenSource_Token_ContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:     server.URL,
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
@@ -761,7 +761,7 @@ func TestSubjectTokenProvider_Variants(t *testing.T) {
 			}))
 			defer server.Close()
 
-			config := &Config{
+			config := &ExchangeConfig{
 				TokenURL:             server.URL,
 				ClientID:             "test-client-id",
 				ClientSecret:         "test-client-secret",
@@ -1001,10 +1001,10 @@ func TestExchangeToken_ScopeArray(t *testing.T) {
 }
 
 // TestConfig_TokenSource tests that TokenSource creates a valid tokenSource.
-func TestConfig_TokenSource(t *testing.T) {
+func TestExchangeConfig_TokenSource(t *testing.T) {
 	t.Parallel()
 
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:     "https://example.com/token",
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
@@ -1140,14 +1140,14 @@ func TestClientAuthentication_Fields(t *testing.T) {
 }
 
 // TestConfig_Fields tests Config struct fields.
-func TestConfig_Fields(t *testing.T) {
+func TestExchangeConfig_Fields(t *testing.T) {
 	t.Parallel()
 
 	provider := func() (string, error) {
 		return "token", nil
 	}
 
-	config := &Config{
+	config := &ExchangeConfig{
 		TokenURL:             "https://example.com/token",
 		ClientID:             "test-client-id",
 		ClientSecret:         "test-client-secret",
