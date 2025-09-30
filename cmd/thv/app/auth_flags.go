@@ -21,6 +21,13 @@ type RemoteAuthFlags struct {
 	RemoteAuthIssuer           string
 	RemoteAuthAuthorizeURL     string
 	RemoteAuthTokenURL         string
+
+	// Token Exchange Configuration
+	TokenExchangeURL          string
+	TokenExchangeClientID     string
+	TokenExchangeClientSecret string
+	TokenExchangeAudience     string
+	TokenExchangeScope        string
 }
 
 // AddRemoteAuthFlags adds the common remote authentication flags to a command
@@ -47,4 +54,16 @@ func AddRemoteAuthFlags(cmd *cobra.Command, config *RemoteAuthFlags) {
 		"OAuth authorization endpoint URL (alternative to --remote-auth-issuer for non-OIDC OAuth)")
 	cmd.Flags().StringVar(&config.RemoteAuthTokenURL, "remote-auth-token-url", "",
 		"OAuth token endpoint URL (alternative to --remote-auth-issuer for non-OIDC OAuth)")
+
+	// Token Exchange flags
+	cmd.Flags().StringVar(&config.TokenExchangeURL, "token-exchange-url", "",
+		"OAuth 2.0 token exchange endpoint URL (enables token exchange when provided)")
+	cmd.Flags().StringVar(&config.TokenExchangeClientID, "token-exchange-client-id", "",
+		"OAuth client ID for token exchange operations")
+	cmd.Flags().StringVar(&config.TokenExchangeClientSecret, "token-exchange-client-secret", "",
+		"OAuth client secret for token exchange operations")
+	cmd.Flags().StringVar(&config.TokenExchangeAudience, "token-exchange-audience", "",
+		"Target audience for exchanged tokens")
+	cmd.Flags().StringVar(&config.TokenExchangeScope, "token-exchange-scope", "",
+		"Scope to request for exchanged tokens (alternative to audience)")
 }

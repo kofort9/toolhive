@@ -18,6 +18,7 @@ import (
 	"github.com/stacklok/toolhive/pkg/auth"
 	"github.com/stacklok/toolhive/pkg/auth/discovery"
 	"github.com/stacklok/toolhive/pkg/auth/oauth"
+	"github.com/stacklok/toolhive/pkg/auth/tokenexchange"
 	"github.com/stacklok/toolhive/pkg/logger"
 	"github.com/stacklok/toolhive/pkg/networking"
 	"github.com/stacklok/toolhive/pkg/transport"
@@ -227,8 +228,14 @@ func proxyCmdFunc(cmd *cobra.Command, args []string) error {
 	}
 	middlewares = append(middlewares, authMiddleware)
 
-	// Add OAuth token injection middleware for outgoing requests if we have an access token
-	if tokenSource != nil {
+	// Add OAuth token injection or token exchange middleware for outgoing requests
+	if remoteAuthFlags.TokenExchangeURL != "" {
+		// Use token exchange middleware when token exchange is configured
+		tokenExchangeConfig := createTokenExchangeConfig()
+		tokenExchangeMiddleware := tokenexchange.CreateTokenExchangeMiddlewareFromClaims(tokenExchangeConfig)
+		middlewares = append(middlewares, tokenExchangeMiddleware)
+	} else if tokenSource != nil {
+		// Fallback to direct token injection when no token exchange is configured
 		tokenMiddleware := createTokenInjectionMiddleware(tokenSource)
 		middlewares = append(middlewares, tokenMiddleware)
 	}
@@ -381,6 +388,24 @@ func resolveClientSecret() (string, error) {
 	// No client secret found - this is acceptable for PKCE flows
 	logger.Debug("No client secret provided - using PKCE flow")
 	return "", nil
+}
+
+// createTokenExchangeConfig creates a TokenExchangeConfig from remoteAuthFlags
+func createTokenExchangeConfig() tokenexchange.Config {
+	// For token exchange, we need a separate client secret resolution
+	// since the token exchange client may be different from the OAuth client
+	var clientSecret string
+	if remoteAuthFlags.TokenExchangeClientSecret != "" {
+		clientSecret = remoteAuthFlags.TokenExchangeClientSecret
+	}
+
+	return tokenexchange.Config{
+		TokenURL:     remoteAuthFlags.TokenExchangeURL,
+		ClientID:     remoteAuthFlags.TokenExchangeClientID,
+		ClientSecret: clientSecret,
+		Audience:     remoteAuthFlags.TokenExchangeAudience,
+		Scope:        remoteAuthFlags.TokenExchangeScope,
+	}
 }
 
 // createTokenInjectionMiddleware creates a middleware that injects the OAuth token into requests
