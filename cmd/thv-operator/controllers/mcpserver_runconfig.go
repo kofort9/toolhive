@@ -335,13 +335,28 @@ func (r *MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPSer
 	}
 
 	// Use the RunConfigBuilder for operator context with full builder pattern
-	return runner.NewOperatorRunConfigBuilder(
+	runConfig, err := runner.NewOperatorRunConfigBuilder(
 		context.Background(),
 		nil,
 		envVars,
 		nil,
 		options...,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Explicitly populate middleware configs to ensure correct server name is used
+	// This is especially important for telemetry middleware which uses the server name
+	// in mcp.server.name attribute. Without this, PopulateMiddlewareConfigs would be
+	// called later and might use incorrect values.
+	if len(runConfig.MiddlewareConfigs) == 0 {
+		if err := runner.PopulateMiddlewareConfigs(runConfig); err != nil {
+			return nil, fmt.Errorf("failed to populate middleware configs: %w", err)
+		}
+	}
+
+	return runConfig, nil
 }
 
 // labelsForRunConfig returns labels for run config ConfigMap
