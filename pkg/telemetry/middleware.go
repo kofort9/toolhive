@@ -1,11 +1,9 @@
 package telemetry
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -93,23 +91,29 @@ func NewHTTPMiddleware(
 // Handler implements the middleware function that wraps HTTP handlers.
 // This middleware should be placed after the MCP parsing middleware in the chain
 // to leverage the parsed MCP data.
+//
+// Telemetry operations are best-effort and non-fatal - any panics are caught and logged
+// to ensure telemetry errors never break the actual service.
 func (m *HTTPMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Telemetry must never break the actual service
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.Errorf("Telemetry middleware panic (non-fatal): %v", rec)
+			}
+		}()
+
 		ctx := r.Context()
 
 		// Handle SSE endpoints specially - they are long-lived connections
 		// that don't follow the normal request/response pattern
 		if strings.HasSuffix(r.URL.Path, "/sse") {
-			// Record SSE connection establishment immediately
 			m.recordSSEConnection(ctx, r)
-
-			// Pass through to SSE handler without waiting for completion
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		// Normal HTTP request handling
-		// Extract trace context from incoming request headers
 		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(r.Header))
 
 		// Increment active connections
@@ -122,36 +126,34 @@ func (m *HTTPMiddleware) Handler(next http.Handler) http.Handler {
 			attribute.String("transport", m.transport),
 		))
 
-		// Create span name based on MCP method if available, otherwise use HTTP method + path
+		// Create span
 		spanName := m.createSpanName(ctx, r)
 		ctx, span := m.tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 		defer span.End()
 
-		// Create a response writer wrapper to capture response details
+		// Create response writer wrapper to capture response details
 		rw := &responseWriter{
 			ResponseWriter: w,
-			statusCode:     http.StatusOK,
+			statusCode:     0,
 			bytesWritten:   0,
-			wroteHeader:    false,
 		}
 
-		// Add HTTP attributes
+		// Add telemetry attributes
 		m.addHTTPAttributes(span, r)
-
-		// Add MCP attributes if parsed data is available
 		m.addMCPAttributes(ctx, span, r)
-
-		// Add environment variables as attributes
 		m.addEnvironmentAttributes(span)
 
-		// Record request start time
+		// Call the handler
 		startTime := time.Now()
-
-		// Call the next handler with the instrumented context
 		next.ServeHTTP(rw, r.WithContext(ctx))
-
-		// Record completion metrics and finalize span
 		duration := time.Since(startTime)
+
+		// Default to 200 if WriteHeader was never called
+		if rw.statusCode == 0 {
+			rw.statusCode = http.StatusOK
+		}
+
+		// Record metrics and finalize
 		m.finalizeSpan(span, rw, duration)
 		m.recordMetrics(ctx, r, rw, duration)
 	})
@@ -401,30 +403,24 @@ func (*HTTPMiddleware) finalizeSpan(span trace.Span, rw *responseWriter, duratio
 	}
 }
 
-// responseWriter wraps http.ResponseWriter to capture response details.
+// responseWriter wraps http.ResponseWriter to capture response details for telemetry.
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode   int
+	statusCode   int   // First status code written (0 = none yet)
 	bytesWritten int64
-	wroteHeader  bool
 }
 
-// WriteHeader captures the status code.
+// WriteHeader captures the first status code for telemetry.
+// Go's http package only honors the first WriteHeader call, so we do the same.
 func (rw *responseWriter) WriteHeader(statusCode int) {
-	if rw.wroteHeader {
-		logger.Infof("WriteHeader called multiple times: attempted status %d, already wrote status %d", statusCode, rw.statusCode)
-		return // Prevent multiple WriteHeader calls
+	if rw.statusCode == 0 {
+		rw.statusCode = statusCode
 	}
-	rw.statusCode = statusCode
-	rw.wroteHeader = true
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
-// Write captures the number of bytes written.
+// Write captures bytes written.
 func (rw *responseWriter) Write(data []byte) (int, error) {
-	if !rw.wroteHeader {
-		rw.WriteHeader(http.StatusOK)
-	}
 	n, err := rw.ResponseWriter.Write(data)
 	rw.bytesWritten += int64(n)
 	return n, err
@@ -435,14 +431,6 @@ func (rw *responseWriter) Flush() {
 	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
-}
-
-// Hijack implements http.Hijacker interface
-func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hijacker, ok := rw.ResponseWriter.(http.Hijacker); ok {
-		return hijacker.Hijack()
-	}
-	return nil, nil, fmt.Errorf("underlying http.ResponseWriter does not implement http.Hijacker")
 }
 
 // recordMetrics records request metrics.

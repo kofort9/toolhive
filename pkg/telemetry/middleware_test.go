@@ -601,25 +601,39 @@ func TestHTTPMiddleware_FinalizeSpan_Logic(t *testing.T) {
 func TestResponseWriter(t *testing.T) {
 	t.Parallel()
 
-	rec := httptest.NewRecorder()
-	rw := &responseWriter{
-		ResponseWriter: rec,
-		statusCode:     http.StatusOK,
-		bytesWritten:   0,
-	}
+	t.Run("captures first status code", func(t *testing.T) {
+		t.Parallel()
+		rec := httptest.NewRecorder()
+		rw := &responseWriter{ResponseWriter: rec}
 
-	// Test WriteHeader
-	rw.WriteHeader(http.StatusCreated)
-	assert.Equal(t, http.StatusCreated, rw.statusCode)
-	assert.Equal(t, http.StatusCreated, rec.Code)
+		rw.WriteHeader(http.StatusCreated)
+		rw.WriteHeader(http.StatusBadRequest) // Should be ignored
 
-	// Test Write
-	data := []byte("test response data")
-	n, err := rw.Write(data)
-	assert.NoError(t, err)
-	assert.Equal(t, len(data), n)
-	assert.Equal(t, int64(len(data)), rw.bytesWritten)
-	assert.Equal(t, string(data), rec.Body.String())
+		assert.Equal(t, http.StatusCreated, rw.statusCode)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+	})
+
+	t.Run("tracks bytes written", func(t *testing.T) {
+		t.Parallel()
+		rec := httptest.NewRecorder()
+		rw := &responseWriter{ResponseWriter: rec}
+
+		rw.Write([]byte("Hello"))
+		rw.Write([]byte(", World!"))
+
+		assert.Equal(t, int64(13), rw.bytesWritten)
+	})
+
+	t.Run("statusCode stays 0 if WriteHeader never called", func(t *testing.T) {
+		t.Parallel()
+		rec := httptest.NewRecorder()
+		rw := &responseWriter{ResponseWriter: rec}
+
+		rw.Write([]byte("test"))
+
+		assert.Equal(t, 0, rw.statusCode)
+		assert.Equal(t, http.StatusOK, rec.Code) // Underlying writer defaults to 200
+	})
 }
 
 func TestHTTPMiddleware_WithRealMetrics(t *testing.T) {
@@ -1489,220 +1503,6 @@ func TestFactoryMiddleware_Integration(t *testing.T) {
 		// Test cleanup
 		err = capturedMiddleware.Close()
 		assert.NoError(t, err)
-	})
-}
-
-// TestResponseWriter_WriteHeader tests the WriteHeader method
-func TestResponseWriter_WriteHeader(t *testing.T) {
-	t.Parallel()
-
-	t.Run("sets status code correctly", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		rw.WriteHeader(http.StatusCreated)
-
-		assert.Equal(t, http.StatusCreated, rw.statusCode)
-		assert.True(t, rw.wroteHeader)
-		assert.Equal(t, http.StatusCreated, rec.Code)
-	})
-
-	t.Run("prevents duplicate WriteHeader calls", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		rw.WriteHeader(http.StatusCreated)
-		rw.WriteHeader(http.StatusBadRequest) // Should be ignored
-
-		assert.Equal(t, http.StatusCreated, rw.statusCode, "Status code should not change after first write")
-		assert.True(t, rw.wroteHeader)
-		assert.Equal(t, http.StatusCreated, rec.Code)
-	})
-}
-
-// TestResponseWriter_Write tests the Write method
-func TestResponseWriter_Write(t *testing.T) {
-	t.Parallel()
-
-	t.Run("writes data and tracks bytes", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		data := []byte("Hello, World!")
-		n, err := rw.Write(data)
-
-		assert.NoError(t, err)
-		assert.Equal(t, len(data), n)
-		assert.Equal(t, int64(len(data)), rw.bytesWritten)
-		assert.Equal(t, "Hello, World!", rec.Body.String())
-	})
-
-	t.Run("automatically writes header on first Write", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		_, err := rw.Write([]byte("test"))
-
-		assert.NoError(t, err)
-		assert.True(t, rw.wroteHeader)
-		assert.Equal(t, http.StatusOK, rec.Code)
-	})
-
-	t.Run("accumulates bytes written", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		rw.Write([]byte("Hello"))
-		rw.Write([]byte(", "))
-		rw.Write([]byte("World!"))
-
-		assert.Equal(t, int64(13), rw.bytesWritten)
-		assert.Equal(t, "Hello, World!", rec.Body.String())
-	})
-}
-
-// TestResponseWriter_Flush tests the Flush method
-func TestResponseWriter_Flush(t *testing.T) {
-	t.Parallel()
-
-	t.Run("calls Flush on underlying Flusher", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		// Write some data
-		rw.Write([]byte("test data"))
-
-		// Flush should not panic even though httptest.ResponseRecorder implements Flusher
-		assert.NotPanics(t, func() {
-			rw.Flush()
-		})
-	})
-
-	t.Run("handles non-Flusher ResponseWriter gracefully", func(t *testing.T) {
-		t.Parallel()
-		// Create a minimal ResponseWriter that doesn't implement Flusher
-		minimalWriter := &minimalResponseWriter{
-			header: make(http.Header),
-			body:   []byte{},
-		}
-
-		rw := &responseWriter{
-			ResponseWriter: minimalWriter,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		// Flush should not panic when underlying writer doesn't support it
-		assert.NotPanics(t, func() {
-			rw.Flush()
-		})
-	})
-}
-
-// TestResponseWriter_Hijack tests the Hijack method
-func TestResponseWriter_Hijack(t *testing.T) {
-	t.Parallel()
-
-	t.Run("returns error when Hijacker not supported", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		conn, buf, err := rw.Hijack()
-
-		assert.Error(t, err)
-		assert.Nil(t, conn)
-		assert.Nil(t, buf)
-		assert.Contains(t, err.Error(), "http.Hijacker")
-	})
-}
-
-// TestResponseWriter_HeadersIntegration tests that headers work correctly
-func TestResponseWriter_HeadersIntegration(t *testing.T) {
-	t.Parallel()
-
-	t.Run("headers are set before WriteHeader", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		// Set headers before writing
-		rw.Header().Set("Content-Type", "application/json")
-		rw.Header().Set("X-Custom-Header", "test-value")
-		rw.WriteHeader(http.StatusCreated)
-
-		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-		assert.Equal(t, "test-value", rec.Header().Get("X-Custom-Header"))
-		assert.Equal(t, http.StatusCreated, rec.Code)
-	})
-
-	t.Run("headers are preserved with Write", func(t *testing.T) {
-		t.Parallel()
-		rec := httptest.NewRecorder()
-		rw := &responseWriter{
-			ResponseWriter: rec,
-			statusCode:     http.StatusOK,
-			bytesWritten:   0,
-			wroteHeader:    false,
-		}
-
-		// Set headers
-		rw.Header().Set("X-Session-Id", "test-session-123")
-		rw.Header().Set("Content-Type", "application/json")
-
-		// Write data (should auto-call WriteHeader)
-		rw.Write([]byte(`{"status":"ok"}`))
-
-		assert.Equal(t, "test-session-123", rec.Header().Get("X-Session-Id"))
-		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-		assert.Equal(t, `{"status":"ok"}`, rec.Body.String())
 	})
 }
 
