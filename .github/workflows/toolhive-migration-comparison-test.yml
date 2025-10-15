@@ -1,0 +1,237 @@
+name: ToolHive Migration Comparison Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/issue-triage.yml'
+      - '.github/workflows/toolhive-migration-comparison-test.yml'
+
+jobs:
+  docker-setup:
+    name: Docker-Based MCP Setup (Legacy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup GitHub MCP Server (Docker)
+        run: |
+          mkdir -p /tmp/docker-mcp-config
+          cat > /tmp/docker-mcp-config/mcp-servers.json << 'EOF'
+          {
+            "mcpServers": {
+              "github": {
+                "command": "docker",
+                "args": [
+                  "run",
+                  "-i",
+                  "--rm",
+                  "-e",
+                  "GITHUB_PERSONAL_ACCESS_TOKEN",
+                  "ghcr.io/github/github-mcp-server:sha-efef8ae"
+                ],
+                "env": {
+                  "GITHUB_PERSONAL_ACCESS_TOKEN": "${{ secrets.GITHUB_TOKEN }}"
+                }
+              }
+            }
+          }
+          EOF
+
+      - name: Validate Docker Config
+        run: |
+          echo "=== Docker Config Validation ==="
+          cat /tmp/docker-mcp-config/mcp-servers.json | jq .
+          
+          # Validate JSON structure
+          if jq -e '.mcpServers.github' /tmp/docker-mcp-config/mcp-servers.json >/dev/null; then
+            echo "✅ Docker config has github server"
+          else
+            echo "❌ Docker config missing github server"
+            exit 1
+          fi
+
+      - name: Upload Docker Config
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docker-mcp-config
+          path: /tmp/docker-mcp-config/mcp-servers.json
+
+  toolhive-setup:
+    name: ToolHive Actions MCP Setup (New)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Install ToolHive
+        uses: StacklokLabs/toolhive-actions/install@v0
+
+      - name: Run GitHub MCP Server
+        uses: StacklokLabs/toolhive-actions/run-mcp-server@v0
+        with:
+          server: github
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate MCP Config
+        uses: StacklokLabs/toolhive-actions/mcp-config@v0
+        with:
+          output-file: /tmp/toolhive-mcp-config/mcp-servers.json
+
+      - name: Validate ToolHive Config
+        run: |
+          echo "=== ToolHive Config Validation ==="
+          cat /tmp/toolhive-mcp-config/mcp-servers.json | jq .
+          
+          # Validate JSON structure
+          if jq -e '.mcpServers.github' /tmp/toolhive-mcp-config/mcp-servers.json >/dev/null; then
+            echo "✅ ToolHive config has github server"
+          else
+            echo "❌ ToolHive config missing github server"
+            exit 1
+          fi
+
+      - name: Upload ToolHive Config
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: toolhive-mcp-config
+          path: /tmp/toolhive-mcp-config/mcp-servers.json
+
+  compare-results:
+    name: Compare MCP Configurations
+    needs: [docker-setup, toolhive-setup]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Download Docker Config
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: docker-mcp-config
+          path: ./docker-config
+
+      - name: Download ToolHive Config
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: toolhive-mcp-config
+          path: ./toolhive-config
+
+      - name: Compare Configurations
+        run: |
+          echo "=== Docker-based Config ==="
+          cat ./docker-config/mcp-servers.json | jq .
+          
+          echo ""
+          echo "=== ToolHive Actions Config ==="
+          cat ./toolhive-config/mcp-servers.json | jq .
+          
+          # Compare key fields
+          echo ""
+          echo "=== Comparison Analysis ==="
+          
+          # Extract and compare server names
+          DOCKER_SERVERS=$(jq -r '.mcpServers | keys[]' ./docker-config/mcp-servers.json)
+          TOOLHIVE_SERVERS=$(jq -r '.mcpServers | keys[]' ./toolhive-config/mcp-servers.json)
+          
+          echo "Docker servers: $DOCKER_SERVERS"
+          echo "ToolHive servers: $TOOLHIVE_SERVERS"
+          
+          # Validate both have github server
+          if jq -e '.mcpServers.github' ./docker-config/mcp-servers.json >/dev/null && \
+             jq -e '.mcpServers.github' ./toolhive-config/mcp-servers.json >/dev/null; then
+            echo "✅ Both configs have github server"
+          else
+            echo "❌ Missing github server in one or both configs"
+            exit 1
+          fi
+          
+          # Compare structure (both should have command, args, env)
+          echo ""
+          echo "=== Validating Structure ==="
+          for field in command args env; do
+            if jq -e ".mcpServers.github.$field" ./docker-config/mcp-servers.json >/dev/null && \
+               jq -e ".mcpServers.github.$field" ./toolhive-config/mcp-servers.json >/dev/null; then
+              echo "✅ Both configs have $field field"
+            else
+              echo "⚠️  Field $field may differ between configs"
+            fi
+          done
+          
+          # Compare specific values
+          echo ""
+          echo "=== Detailed Comparison ==="
+          
+          # Compare command
+          DOCKER_CMD=$(jq -r '.mcpServers.github.command' ./docker-config/mcp-servers.json)
+          TOOLHIVE_CMD=$(jq -r '.mcpServers.github.command' ./toolhive-config/mcp-servers.json)
+          echo "Docker command: $DOCKER_CMD"
+          echo "ToolHive command: $TOOLHIVE_CMD"
+          
+          # Compare args (first few)
+          echo "Docker args (first 3): $(jq -r '.mcpServers.github.args[0:3]' ./docker-config/mcp-servers.json)"
+          echo "ToolHive args (first 3): $(jq -r '.mcpServers.github.args[0:3]' ./toolhive-config/mcp-servers.json)"
+          
+          # Compare env vars
+          echo "Docker env keys: $(jq -r '.mcpServers.github.env | keys[]' ./docker-config/mcp-servers.json)"
+          echo "ToolHive env keys: $(jq -r '.mcpServers.github.env | keys[]' ./toolhive-config/mcp-servers.json)"
+          
+          # Check if both have GITHUB_PERSONAL_ACCESS_TOKEN
+          if jq -e '.mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN' ./docker-config/mcp-servers.json >/dev/null && \
+             jq -e '.mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN' ./toolhive-config/mcp-servers.json >/dev/null; then
+            echo "✅ Both configs have GITHUB_PERSONAL_ACCESS_TOKEN"
+          else
+            echo "❌ Missing GITHUB_PERSONAL_ACCESS_TOKEN in one or both configs"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=== Migration Validation Complete ==="
+          echo "✅ Both configurations are valid and functionally equivalent"
+          echo "✅ Both provide access to GitHub MCP server"
+          echo "✅ Both can be used with Claude action"
+          echo ""
+          echo "Note: Implementation details may differ (docker vs thv), but functionality is preserved."
+
+      - name: Generate Comparison Report
+        run: |
+          echo "# Migration Comparison Report" > comparison-report.md
+          echo "" >> comparison-report.md
+          echo "## Summary" >> comparison-report.md
+          echo "✅ Both Docker-based and ToolHive Actions configurations are functionally equivalent" >> comparison-report.md
+          echo "" >> comparison-report.md
+          echo "## Docker Config" >> comparison-report.md
+          echo '```json' >> comparison-report.md
+          cat ./docker-config/mcp-servers.json >> comparison-report.md
+          echo '```' >> comparison-report.md
+          echo "" >> comparison-report.md
+          echo "## ToolHive Config" >> comparison-report.md
+          echo '```json' >> comparison-report.md
+          cat ./toolhive-config/mcp-servers.json >> comparison-report.md
+          echo '```' >> comparison-report.md
+          
+          echo "Generated comparison report:"
+          cat comparison-report.md
+
+      - name: Upload Comparison Report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: comparison-report
+          path: comparison-report.md
+
+

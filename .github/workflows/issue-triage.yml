@@ -18,29 +18,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup GitHub MCP Server
-        run: |
-          mkdir -p /tmp/mcp-config
-          cat > /tmp/mcp-config/mcp-servers.json << 'EOF'
-          {
-            "mcpServers": {
-              "github": {
-                "command": "docker",
-                "args": [
-                  "run",
-                  "-i",
-                  "--rm",
-                  "-e",
-                  "GITHUB_PERSONAL_ACCESS_TOKEN",
-                  "ghcr.io/github/github-mcp-server:sha-efef8ae"
-                ],
-                "env": {
-                  "GITHUB_PERSONAL_ACCESS_TOKEN": "${{ secrets.GITHUB_TOKEN }}"
-                }
-              }
-            }
-          }
-          EOF
+      - name: Install ToolHive
+        uses: StacklokLabs/toolhive-actions/install@v0
+
+      - name: Run GitHub MCP Server
+        uses: StacklokLabs/toolhive-actions/run-mcp-server@v0
+        with:
+          server: github
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate MCP Config
+        uses: StacklokLabs/toolhive-actions/mcp-config@v0
+        with:
+          output-file: /tmp/mcp-config/mcp-servers.json
 
       - name: Create triage prompt
         run: |
