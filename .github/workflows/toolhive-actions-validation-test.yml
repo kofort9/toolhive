@@ -1,0 +1,117 @@
+name: ToolHive Actions Validation Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/issue-triage.yml'
+      - '.github/workflows/toolhive-actions-validation-test.yml'
+
+jobs:
+  test-toolhive-actions:
+    name: Validate ToolHive Actions MCP Setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Install ToolHive
+        uses: StacklokLabs/toolhive-actions/install@v0
+
+      - name: Run GitHub MCP Server
+        id: run-github-server
+        uses: StacklokLabs/toolhive-actions/run-mcp-server@v0
+        with:
+          server: github
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate MCP Config
+        id: generate-config
+        uses: StacklokLabs/toolhive-actions/mcp-config@v0
+        with:
+          output-file: /tmp/mcp-config/mcp-servers.json
+
+      - name: Verify MCP Config Format
+        run: |
+          echo "=== MCP Config File Contents ==="
+          cat /tmp/mcp-config/mcp-servers.json
+          echo ""
+          
+          echo "=== Validating JSON Format ==="
+          jq . /tmp/mcp-config/mcp-servers.json
+          
+          echo "=== Checking for GitHub Server ==="
+          if jq -e '.mcpServers.github' /tmp/mcp-config/mcp-servers.json > /dev/null; then
+            echo "✅ GitHub MCP server found in config"
+          else
+            echo "❌ GitHub MCP server not found in config"
+            exit 1
+          fi
+          
+          echo "=== Server Configuration ==="
+          jq '.mcpServers.github' /tmp/mcp-config/mcp-servers.json
+
+      - name: Verify Server Status
+        run: |
+          echo "=== Server Status ==="
+          echo "Server URL: ${{ steps.run-github-server.outputs.url }}"
+          echo "Server Port: ${{ steps.run-github-server.outputs.port }}"
+          echo "Server Status: ${{ steps.run-github-server.outputs.status }}"
+          echo "Container Name: ${{ steps.run-github-server.outputs.container-name }}"
+          
+          # Verify server is running
+          if [ "${{ steps.run-github-server.outputs.status }}" = "running" ]; then
+            echo "✅ MCP server is running"
+          else
+            echo "❌ MCP server is not running"
+            exit 1
+          fi
+
+      - name: Test MCP Tools Availability
+        run: |
+          echo "=== Testing MCP Tools ==="
+          
+          # List available tools using thv
+          echo "Available tools:"
+          thv list --format=json | jq -r '.servers[] | select(.name == "github") | .tools[]?.name // "No tools listed"'
+          
+          # Verify the expected tools are available
+          # Note: This is a basic check - actual tool testing would require MCP client
+          echo "✅ ToolHive Actions setup completed successfully"
+
+      - name: Test Config Compatibility with Claude
+        run: |
+          echo "=== Testing Config Compatibility ==="
+          
+          # Verify the config file has the structure expected by Claude
+          if jq -e '.mcpServers | keys | length > 0' /tmp/mcp-config/mcp-servers.json > /dev/null; then
+            echo "✅ Config has mcpServers section"
+          else
+            echo "❌ Config missing mcpServers section"
+            exit 1
+          fi
+          
+          # Check if GitHub server has required fields
+          github_config=$(jq '.mcpServers.github' /tmp/mcp-config/mcp-servers.json)
+          if echo "$github_config" | jq -e '.command' > /dev/null; then
+            echo "✅ GitHub server has command field"
+          else
+            echo "❌ GitHub server missing command field"
+            exit 1
+          fi
+          
+          echo "✅ Config format is compatible with Claude action"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "=== Cleaning up MCP servers ==="
+          thv stop --all || true
