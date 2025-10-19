@@ -18,8 +18,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install ToolHive
-        uses: StacklokLabs/toolhive-actions/install@v0
+    - name: Install ToolHive
+      uses: StacklokLabs/toolhive-actions/install@v0
+      with:
+        version: v0.3.11
 
       - name: Run GitHub MCP Server
         uses: StacklokLabs/toolhive-actions/run-mcp-server@v0
