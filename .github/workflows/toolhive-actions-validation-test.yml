@@ -29,6 +29,8 @@ jobs:
 
       - name: Initialize ToolHive Secrets Provider
         run: thv secret provider none
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run GitHub MCP Server
         id: run-github-server
@@ -91,6 +93,8 @@ jobs:
           # Verify the expected tools are available
           # Note: This is a basic check - actual tool testing would require MCP client
           echo "✅ ToolHive Actions setup completed successfully"
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Test Config Compatibility with Claude
         run: |
@@ -114,9 +118,13 @@ jobs:
           fi
           
           echo "✅ Config format is compatible with Claude action"
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup
         if: always()
         run: |
           echo "=== Cleaning up MCP servers ==="
           thv stop --all || true
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
