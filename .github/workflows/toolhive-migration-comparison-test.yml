@@ -84,6 +84,9 @@ jobs:
         with:
           version: v0.3.11
 
+      - name: Initialize ToolHive Secrets Provider
+        run: thv secret provider none
+
       - name: Run GitHub MCP Server
         uses: StacklokLabs/toolhive-actions/run-mcp-server@v0
         with:
