@@ -39,6 +39,8 @@ jobs:
         uses: StacklokLabs/toolhive-actions/mcp-config@v0
         with:
           output-file: /tmp/mcp-config/mcp-servers.json
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create triage prompt
         run: |
