@@ -25,8 +25,6 @@ jobs:
 
       - name: Initialize ToolHive Secrets Provider
         run: thv secret provider none
-        env:
-          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run GitHub MCP Server
         uses: StacklokLabs/toolhive-actions/run-mcp-server@v0
